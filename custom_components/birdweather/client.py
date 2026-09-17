@@ -337,7 +337,10 @@ class BirdWeatherClient:
                     "after": after,
                 },
             )
-            connection = ((data.get("station") or {}).get("detections") or {})
+            station = data.get("station")
+            if station is None:
+                raise BirdWeatherError("Station not found or not publicly accessible")
+            connection = station.get("detections") or {}
             page = connection.get("nodes") or []
             if not page:
                 break
@@ -412,7 +415,9 @@ class BirdWeatherClient:
             _TOP_SPECIES_QUERY,
             {"id": station_id, "period": {"count": months, "unit": "month"}, "limit": limit},
         )
-        station = data.get("station") or {}
+        station = data.get("station")
+        if station is None:
+            raise BirdWeatherError("Station not found or not publicly accessible")
         nodes = station.get("topSpecies") or []
         out: list[dict[str, Any]] = []
         for n in nodes:
