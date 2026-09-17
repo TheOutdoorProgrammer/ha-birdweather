@@ -149,10 +149,15 @@ harness catches *any* unintended change to the overall output shape.
 
 ## Cards
 
-The two Lovelace cards in `custom_components/birdweather/www/` are generated from
-the canonical Haikubox cards by `scripts/sync-cards.sh` (brand substitution plus
-a small feature flip). Don't hand-edit them ad hoc — see the header comment in
-each card and [docs/cards.md](cards.md).
+This fork maintains the two Lovelace cards in `custom_components/birdweather/www/`
+directly. Shared wildlife formatting lives in `birdweather-wildlife.js`. Keep
+existing card names and defaults compatible. Port useful upstream card changes
+through reviewed diffs; see [ADR 1](../adr/0001-maintain-wildlife-cards-in-this-fork.md)
+for why the regeneration script was retired.
+
+Run `node --test tests/cards-bats.test.mjs` (Node 22+) alongside the Python suite.
+For visible changes, check both cards and the popup at phone, tablet and desktop
+widths with bird, bat, mixed and empty detection lists.
 
 ## Pull request conventions
 

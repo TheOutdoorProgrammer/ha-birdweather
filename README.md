@@ -1,12 +1,34 @@
-# BirdWeather for Home Assistant
+# BirdWeather for Home Assistant, with BAT PUC support
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2025.4+-blue.svg?logo=homeassistant)](https://www.home-assistant.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Home Assistant custom integration for [BirdWeather](https://www.birdweather.com/) stations (PUC, BirdNET-Pi, and other registered stations). Surfaces recent detections, daily and rolling species counts, activity and diversity trends, and highlights unusual visitors — all with bird photos and custom Lovelace cards.
+A fork of [eklundjon/ha-birdweather](https://github.com/eklundjon/ha-birdweather)
+for [BirdWeather](https://www.birdweather.com/) stations, including the BAT PUC.
+It adds bat identifications, behavior, automation triggers and bat views to the
+existing sensors and Lovelace cards.
 
-It reads the **public** BirdWeather GraphQL API anonymously — no account or API token is needed for any station whose owner has made it public.
+It reads the public BirdWeather GraphQL API anonymously. Your station must be
+public; no account or API token is needed. Polling defaults to every 10 minutes.
+
+## BAT PUC
+
+- **Last bat detection** persists the last bat and a separate 50-event bat history
+  across restarts, even when daytime birds fill the main feed.
+- **Recent bats** counts distinct bat identifications in the configured recent
+  window. Detections carry BirdWeather IDs, behavior, confidence and candidate
+  species. Candidates are alternatives, and broader labels stay as reported.
+- **Bat automations** cover any bat detection, searching in open space or clutter,
+  chasing, feeding buzzes, approaching and passing. Repeated polls and restarts
+  do not replay processed bat events.
+- **Cards** support `classification: bat` or `bird`, bat icons, behavior confidence
+  and candidate weights. Existing cards default to all classifications.
+
+The feed is limited to the latest 300 detections per poll, so busy stations can
+have gaps. Station totals and diversity still cover every classification.
+Recordings play at their original speed; ultrasonic bat calls may be inaudible.
+Time-expanded bat audio is not implemented.
 
 ## Features
 
@@ -36,12 +58,12 @@ It reads the **public** BirdWeather GraphQL API anonymously — no account or AP
 
 **HACS (recommended)**
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=eklundjon&repository=ha-birdweather&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=TheOutdoorProgrammer&repository=ha-birdweather&category=integration)
 
 Click the badge to open HACS in your Home Assistant with this repository pre-filled, then **Download** and restart. Or add it manually:
 
 1. In **HACS**, open the **⋮** menu (top right) → **Custom repositories**
-2. Add `https://github.com/eklundjon/ha-birdweather`, type **Integration**, then **Add**
+2. Add `https://github.com/TheOutdoorProgrammer/ha-birdweather`, type **Integration**, then **Add**
 3. Search HACS for **BirdWeather**, open it, and click **Download**
 4. Restart Home Assistant
 
@@ -49,6 +71,9 @@ Click the badge to open HACS in your Home Assistant with this repository pre-fil
 
 1. Copy the `custom_components/birdweather` folder into your HA `config/custom_components/` directory
 2. Restart Home Assistant
+
+This fork uses the same `birdweather` integration domain as upstream. Replace
+the existing integration files when switching; do not install both copies.
 
 ### Configure
 
@@ -61,6 +86,21 @@ Click the badge to open HACS in your Home Assistant with this repository pre-fil
 A device is created and named after the station, with the sensors above plus an "extended silence" binary sensor.
 
 ### Add a card
+
+For a BAT PUC, use these sensors (replace `<station>` with your entity prefix):
+
+```yaml
+type: custom:birdweather-bird-card
+entity: sensor.<station>_last_bat_detection
+classification: bat
+```
+
+```yaml
+type: custom:birdweather-bird-list-card
+entity: sensor.<station>_recent_bats
+classification: bat
+title: Recent bats
+```
 
 Both custom cards register automatically — no Lovelace resource setup required. The simplest "show me a bird" card:
 
@@ -92,7 +132,11 @@ entities:
 
 ### Automations & blueprints
 
-The integration exposes three **device triggers** — new-species, unusual-visitor, and watched-species — in the automation editor (**When → Device**). Each is a filtered view of the `birdweather_event` bus event, whose payload carries the species, scientific name, photo (`image_url`), reference links (`ebird_url`, `wikipedia_url`), the call recording (`audio_url`), and per-trigger extras (`days_absent`, `lifetime_species_count`).
+The automation editor (**When → Device**) offers new-species, unusual-visitor,
+watched-species, bat-detection and bat-behavior triggers. Each filters the
+`birdweather_event` bus event for your station. The payload includes the
+identification, photo, recording when enabled, confidence and bat metadata.
+See [automations](docs/automations.md) for event fields and a feeding-buzz example.
 
 Four ready-made **blueprints** are included as worked examples. Blueprints aren't installed with the integration — Home Assistant imports them from a URL — so click a badge for one-click import ([full instructions](docs/automations.md#importing-a-blueprint)):
 
@@ -114,7 +158,10 @@ After setup, open the integration's **Configure** dialog to tune:
 - **Notability rarity weight** — how much the "notable species" pick leans on rarity vs. recency (100% = pure rarity; default 70%).
 - **Unusual-visitor days** — how long a known species must go unheard before its reappearance counts as an unusual visitor (default 30 days).
 - **Hide detections below confidence** — suppress low-confidence "maybe" detections from the recent / last / notable / new sensors and the cards (0% = show everything, the default). The 24-hour **total** and **diversity** counts come straight from BirdWeather's own aggregates and are *not* affected by this filter — they always reflect the station's own confidence floor.
-- **Only alert above confidence** — don't fire the new-species, unusual-visitor, or watched-species triggers below this confidence (0% = alert on any, the default). Independent of the hide filter, so you can keep seeing maybes while only being pinged on confident hits.
+- **Only alert above confidence** applies to all detection triggers, including
+  bat behaviors (0% allows any confidence). It checks identification confidence,
+  independently of the feed filter. Behavior confidence remains available in
+  the event payload for automation conditions.
 - **Watched species** — choose species (from a pick-list of ones your station has detected, and/or a free-text list for ones it hasn't) to be alerted about. When a watched species is heard, the **"Watched species detected"** device trigger fires — wire it to a notification in the automation editor.
 - **Advanced** (collapsed by default) — window lengths and poll cadence; defaults suit most stations:
   - **Recent window** (1–24 h, default 1) — how far back "Recent detections" looks and how long a species stays "recent" before it can re-fire a trigger.

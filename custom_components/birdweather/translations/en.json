@@ -41,7 +41,7 @@
           "notable_rarity_weight": "100% = pure rarity; 0% = pure recency. Default 70% leans toward rarity with a small recency nudge.",
           "absence_days": "How long a known species must have gone unheard before it counts as an unusual visitor. Default 30 days.",
           "feed_min_confidence": "Suppress low-confidence “maybe” detections from the recent/last/notable/new sensors and the cards. 0% = show everything. The 24-hour total and diversity counts come straight from BirdWeather and aren’t affected.",
-          "alert_min_confidence": "Don’t fire the new-species, unusual-visitor, or watched-species triggers below this confidence. 0% = alert on any. Independent of the hide filter, so you can see maybes but only be pinged on confident hits.",
+          "alert_min_confidence": "Don’t fire detection triggers below this identification confidence, including bat and bat-behavior triggers. 0% = alert on any. Independent of the hide filter, so you can see maybes but only be pinged on confident hits.",
           "audio_enabled": "Beta. Off by default. Adds a “play the call” button on the cards that plays a detection’s soundscape in the browser. Heads-up: if your BirdWeather station has audio sharing turned off, its soundscapes are silent — the button will appear but play nothing (we stream BirdWeather’s clip directly and can’t detect a silent one). Off means no audio_url is exposed, so no button.",
           "watched_species": "Pick from species your station has already detected. A “watched species detected” device trigger fires when one is heard.",
           "watched_species_extra": "Add species you haven’t recorded yet (e.g. a hoped-for visitor) — one common name per line, exactly as BirdWeather spells it."
@@ -57,7 +57,7 @@
               "new_species_window_days": "New-species momentum window"
             },
             "data_description": {
-              "recent_window_hours": "How far back the “Recent detections” sensor looks, and how long a species stays “recent” before it can re-fire a new/unusual/watched trigger. Default 1 hour. Longer means a fuller recent list but fewer repeat alerts.",
+              "recent_window_hours": "How far back the “Recent detections” and “Recent bats” sensors look, and how long a species stays “recent” before it can re-fire a new/unusual/watched trigger. Default 1 hour. Bat triggers fire for each new detection regardless of this window.",
               "scan_interval": "How often the station is polled, in minutes (5–60, default 10). Shorter is fresher but more API load.",
               "rarity_period_months": "Trailing months of BirdWeather topSpecies counts used to rank rarity (the notable/rarest sensors and the rarity_score on events). Default 1 month. Shorter favors recent frequency; longer trends toward all-time.",
               "new_species_window_days": "Trailing days for the “new species” momentum sensor — how many species were first heard here within this window. Default 30. Display-only; affects just that sensor."
@@ -71,13 +71,22 @@
     "trigger_type": {
       "new_species": "New species detected",
       "unusual_visitor": "Unusual visitor detected",
-      "watched_species": "Watched species detected"
+      "watched_species": "Watched species detected",
+      "bat_detected": "Bat detected",
+      "bat_search_open": "Bat searching in open space detected",
+      "bat_search_clutter": "Bat searching in clutter detected",
+      "bat_chase": "Bat chase detected",
+      "bat_feeding_buzz": "Bat feeding buzz detected",
+      "bat_approach": "Bat approach detected",
+      "bat_pass": "Bat pass detected"
     }
   },
   "entity": {
     "sensor": {
       "recent_detections": { "name": "Recent detections (1 h)" },
       "last_detection": { "name": "Last detection" },
+      "recent_bats": { "name": "Recent bats" },
+      "last_bat_detection": { "name": "Last bat detection" },
       "daily_count": { "name": "Total detections (24 h)" },
       "daily_top_species": { "name": "Top species (24 h)" },
       "notable_species": { "name": "Notable species" },

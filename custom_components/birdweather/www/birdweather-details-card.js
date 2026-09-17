@@ -1,22 +1,9 @@
-// Ranked list card. GENERATED from ha-haikubox's haikubox-details-card.js (the
-// canonical card) via scripts/sync-cards.sh — brand substitution plus the
-// FEATURES flip below. Two BirdWeather deltas are layered on top of the sync:
-// (a) FEATURES enables the confidence + activity editor toggles (BirdWeather has
-// that data), and (b) the BirdWeather reference link (`birdweather_url`), which
-// the canonical Haikubox card intentionally omits — see the `bw` handling in the
-// editor and _linksBlock below. Don't hand-edit anything else: change the
-// Haikubox card and re-run sync-cards.sh, then re-apply the BirdWeather link.
-function _esc(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+const {
+  escapeHtml: _esc, filterDetections, validateClassification, classification,
+  identity, glyph, classificationBadge, behaviorHtml, shortlistHtml,
+  classificationSelector, wildlifeStyles,
+} = await import(new URL(`./birdweather-wildlife.js${new URL(import.meta.url).search}`, import.meta.url));
 
-// Per-integration feature flags: which editor toggles to expose (the FEATURES
-// flip the sync makes beyond brand tokens). BirdWeather supplies confidence and
-// diel-activity data, so both are enabled here (Haikubox sets them false).
 const FEATURES = { confidence: true, activity: true };
 
 // Confidence band → display label. The integration derives the low/medium/high
@@ -81,6 +68,7 @@ class BirdWeatherBirdListCardEditor extends HTMLElement {
       if (this._picker)     this._picker.value     = config.entity ?? "";
       if (this._titleField) this._titleField.value = config.title ?? "";
       if (this._topField)   this._topField.value   = config.top ?? 10;
+      if (this._classificationField) this._classificationField.value = config.classification ?? "all";
       if (this._sizeField)  this._sizeField.value  = config.row_size ?? "small";
       if (this._ebirdField) this._ebirdField.value = !!config.show_ebird;
       if (this._aabField)   this._aabField.value   = !!config.show_allaboutbirds;
@@ -102,6 +90,7 @@ class BirdWeatherBirdListCardEditor extends HTMLElement {
       if (this._picker)     this._picker.hass     = hass;
       if (this._titleField) this._titleField.hass = hass;
       if (this._topField)   this._topField.hass   = hass;
+      if (this._classificationField) this._classificationField.hass = hass;
       if (this._sizeField)  this._sizeField.hass  = hass;
       if (this._ebirdField) this._ebirdField.hass = hass;
       if (this._aabField)   this._aabField.hass   = hass;
@@ -180,7 +169,8 @@ class BirdWeatherBirdListCardEditor extends HTMLElement {
     });
     this._topField = topField;
 
-    form.append(entityField, titleField, topField);
+    this._classificationField = classificationSelector(this._config, this._hass, (update) => this._fire(update));
+    form.append(entityField, titleField, this._classificationField, topField);
 
     // Row size (density) — scales the compact-row photo, padding, and text.
     // ha-selector dropdown; skipped on older HA without ha-selector (the
@@ -329,7 +319,10 @@ class BirdWeatherBirdListCard extends HTMLElement {
     if (config.entity === undefined) throw new Error("'entity' is required");
     // `position` (1-based) + `detail_only` drive the single-bird detail popup
     // the bird card opens; ignored in normal list mode.
-    this._config = { top: 10, row_size: "small", position: 1, ...config };
+    const classification = validateClassification(config.classification);
+    this._config = { top: 10, row_size: "small", position: 1, ...config, classification };
+    this._rendered = false;
+    if (this._hass) this._render();
   }
 
   set hass(hass) {
@@ -399,7 +392,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
     const icon = btn.querySelector(".play-icon");
     const label = btn.querySelector(".play-label");
     if (icon) icon.textContent = playing ? "⏸" : "▶";
-    if (label) label.textContent = playing ? "Playing…" : "Play call";
+    if (label) label.textContent = playing ? "Playing…" : (btn.dataset.label || "Play call");
   }
   _updateTimes() {
     if (!this.shadowRoot) return;
@@ -428,9 +421,11 @@ class BirdWeatherBirdListCard extends HTMLElement {
     const btn = (url, label) =>
       `<a class="link-btn" href="${_esc(url)}" target="_blank" rel="noreferrer noopener" title="${_esc(item.species)} on ${label}">${label}</a>`;
     const parts = [];
-    if (f.ebird && item.ebird_url) parts.push(btn(item.ebird_url, "eBird"));
-    if (f.aab && item.allaboutbirds_url) parts.push(btn(item.allaboutbirds_url, "All About Birds"));
-    if (f.ml && item.macaulay_url) parts.push(btn(item.macaulay_url, "Macaulay Library"));
+    if (classification(item) !== "bat") {
+      if (f.ebird && item.ebird_url) parts.push(btn(item.ebird_url, "eBird"));
+      if (f.aab && item.allaboutbirds_url) parts.push(btn(item.allaboutbirds_url, "All About Birds"));
+      if (f.ml && item.macaulay_url) parts.push(btn(item.macaulay_url, "Macaulay Library"));
+    }
     if (f.bw && item.birdweather_url) parts.push(btn(item.birdweather_url, "BirdWeather"));
     // Wikipedia is intentionally not a button: it's reached by tapping the
     // description blurb (which is sourced from Wikipedia), so a separate pill
@@ -490,8 +485,8 @@ class BirdWeatherBirdListCard extends HTMLElement {
     if (!this._openSpecies || this._config?.show_description === false) return;
     const el = this.shadowRoot?.querySelector(".item.is-open .detail-desc-text");
     if (!el) return;
-    const item = this._items?.find((i) => i.species === this._openSpecies);
-    if (item?.wikipedia_url) this._loadDescription(item.species, item.wikipedia_url, el);
+    const item = this._items?.find((i) => identity(i) === this._openSpecies);
+    if (item?.wikipedia_url) this._loadDescription(identity(item), item.wikipedia_url, el);
   }
 
   // Photo credit/license for the expanded view. The coordinator sanitises
@@ -524,17 +519,18 @@ class BirdWeatherBirdListCard extends HTMLElement {
   // (CSS hides `.compact` when open). Shared by the ranked list and the
   // single-bird detail_only popup (which renders just this row, force-open).
   _itemHtml(item, i) {
-    const open = item.species === this._openSpecies;
+    const open = identity(item) === this._openSpecies;
     const t = this._relativeTime(item.last_seen);
     return `
-                <div class="item${open ? " is-open" : ""}" data-idx="${i}" role="button" tabindex="0" aria-expanded="${open ? "true" : "false"}">
+                <div class="item${open ? " is-open" : ""}" data-idx="${i}"${this._config.detail_only ? "" : ` role="button" tabindex="0" aria-expanded="${open ? "true" : "false"}"`}>
                   <div class="compact">
                     ${item.image_url
                       ? `<img class="thumb" src="${_esc(item.image_url)}" alt="${_esc(item.species)}" loading="lazy">`
-                      : `<div class="thumb-placeholder">🐦</div>`}
+                      : `<div class="thumb-placeholder">${glyph(item)}</div>`}
                     <div class="rank">${_esc(this._rank(item, i))}</div>
                     <div class="info">
                       <div class="name">${_esc(item.species)}</div>
+                      ${classificationBadge(item)}
                       ${item.scientific_name ? `<div class="sub">${_esc(item.scientific_name)}</div>` : ""}
                     </div>
                     ${this._linksBlock(item, { ebird: this._config.show_ebird, aab: this._config.show_allaboutbirds, ml: this._config.show_macaulay, bw: this._config.show_birdweather }, "row-links")}
@@ -542,12 +538,13 @@ class BirdWeatherBirdListCard extends HTMLElement {
                   <div class="detail">
                     ${item.image_url
                       ? `<img class="detail-photo" src="${_esc(item.image_url)}" alt="${_esc(item.species)}" loading="lazy">`
-                      : `<div class="detail-photo-placeholder">🐦</div>`}
+                      : `<div class="detail-photo-placeholder">${glyph(item)}</div>`}
                     <div class="detail-text">
+                      ${classificationBadge(item)}
                       <div class="detail-name">${_esc(item.species)}</div>
                       ${item.scientific_name ? `<div class="detail-sci">${_esc(item.scientific_name)}</div>` : ""}
                       ${this._config.show_description !== false && item.wikipedia_url
-                        ? `<a class="detail-desc" href="${_esc(item.wikipedia_url)}" target="_blank" rel="noreferrer noopener" title="Read more on Wikipedia"><span class="detail-desc-text" data-species="${_esc(item.species)}">${_esc(this._descCache?.get(item.species) ?? "")}</span></a>`
+                        ? `<a class="detail-desc" href="${_esc(item.wikipedia_url)}" target="_blank" rel="noreferrer noopener" title="Read more on Wikipedia"><span class="detail-desc-text" data-species="${_esc(identity(item))}">${_esc(this._descCache?.get(identity(item)) ?? "")}</span></a>`
                         : ""}
                       <div class="metrics">
                         ${item.count != null ? `<div class="metric"><strong>${_esc(item.count)}×</strong></div>` : ""}
@@ -557,11 +554,13 @@ class BirdWeatherBirdListCard extends HTMLElement {
                           : ""}
                         ${item.alpha ? `<div class="metric" title="Alpha banding code"><strong>${_esc(item.alpha)}</strong></div>` : ""}
                       </div>
+                      ${behaviorHtml(item)}
+                      ${shortlistHtml(item)}
                       ${this._config.show_activity !== false && Array.isArray(item.hourly) && item.hourly.some((v) => v > 0)
                         ? `<div class="detail-activity" title="Hourly activity (last 7 days)"><span class="spark">${_sparkline(item.hourly)}</span><span class="peak">most active ~${_peakHourLabel(item.hourly)}</span></div>`
                         : ""}
                       ${this._config.show_audio !== false && item.audio_url
-                        ? `<button class="play-call" type="button" data-audio="${_esc(item.audio_url)}" data-species="${_esc(item.species)}" aria-label="Play recording of ${_esc(item.species)}"><span class="play-icon">▶</span><span class="play-label">Play call</span></button>`
+                        ? `<button class="play-call" type="button" data-audio="${_esc(item.audio_url)}" data-species="${_esc(item.species)}" data-label="${classification(item) === "bat" ? "Play original recording" : "Play call"}" aria-label="Play recording of ${_esc(item.species)}"><span class="play-icon">▶</span><span class="play-label">${classification(item) === "bat" ? "Play original recording" : "Play call"}</span></button>${classification(item) === "bat" ? '<div class="audio-note">Original speed. Ultrasonic calls may be inaudible.</div>' : ""}`
                         : ""}
                       ${this._linksBlock(item, { ebird: true, aab: true, ml: true, bw: true }, "detail-links")}
                       ${this._attributionBlock(item)}
@@ -583,14 +582,15 @@ class BirdWeatherBirdListCard extends HTMLElement {
     // expanded-row template, compact row hidden by CSS) — the bird card's
     // "details" popup. Otherwise the normal ranked list, sliced to `top`.
     const detailOnly = !!this._config.detail_only;
+    const detections = filterDetections(attrs.detections, this._config.classification);
     let items;
     if (detailOnly) {
-      const all = attrs.detections ?? [];
-      const pos = Math.min(Math.max(1, this._config.position || 1), Math.max(all.length, 1));
+      const all = detections;
+      const pos = Math.max(1, this._config.position || 1);
       items = all[pos - 1] ? [all[pos - 1]] : [];
-      this._openSpecies = items[0] ? items[0].species : null;  // force-expanded
+      this._openSpecies = items[0] ? identity(items[0]) : null;
     } else {
-      items = (attrs.detections ?? []).slice(0, this._config.top);
+      items = detections.slice(0, this._config.top);
     }
     this._items = items;  // referenced by the row toggle handler
     // Fall back to the entity's friendly name when no title is set.
@@ -610,6 +610,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>
+        ${wildlifeStyles}
         :host { display: block; height: 100%; }
         ha-card {
           overflow: hidden;
@@ -814,7 +815,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
           justify-content: center;
           font-size: 2.5em;
         }
-        .detail-text { flex: 1; min-width: 0; }
+        .detail-text { flex: 1; min-width: 0; width: 100%; }
 
         @container (min-width: 380px) {
           .item.is-open .detail {
@@ -975,7 +976,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
         ${title ? `<div class="card-header">${_esc(title)}</div>` : ""}
         <div class="list${sizeClass}${detailOnly ? " detail-only" : ""}">
           ${items.length === 0
-            ? `<div class="empty">No data yet</div>`
+            ? `<div class="empty">${this._config.classification === "all" ? "No data yet" : `No ${this._config.classification} detections`}</div>`
             : items.map((item, i) => this._itemHtml(item, i)).join("")}
         </div>
         </div>
@@ -1023,7 +1024,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
         placeholder.className = img.classList.contains("thumb")
           ? "thumb-placeholder"
           : "detail-photo-placeholder";
-        placeholder.textContent = "🐦";
+        placeholder.textContent = glyph(this._items?.[img.closest(".item")?.dataset.idx]);
         img.replaceWith(placeholder);
       });
     });
@@ -1038,7 +1039,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
   // Single-open: opening one closes any other.
   _toggleItem(item) {
     const idx = item.dataset.idx;
-    const species = this._items?.[idx]?.species ?? null;
+    const species = identity(this._items?.[idx]) || null;
     const opening = !item.classList.contains("is-open");
     this.shadowRoot.querySelectorAll(".item").forEach((el) => {
       el.classList.remove("is-open");
@@ -1056,7 +1057,7 @@ class BirdWeatherBirdListCard extends HTMLElement {
 
   getCardSize() {
     const attrs = this._hass?.states[this._config.entity]?.attributes ?? {};
-    return Math.min(attrs.detections?.length ?? 0, this._config.top) + 2;
+    return Math.min(filterDetections(attrs.detections, this._config.classification).length, this._config.top) + 2;
   }
 
   getGridOptions() {
@@ -1077,7 +1078,7 @@ if (!customElements.get("birdweather-bird-list-card")) {
   window.customCards ??= [];
   window.customCards.push({
     type: "birdweather-bird-list-card",
-    name: "BirdWeather Bird List Card",
-    description: "Ranked bird species list — works with yearly, daily, or 7-day rarity sensors.",
+    name: "BirdWeather Wildlife List Card",
+    description: "Ranked wildlife detections with bat behavior and candidate identifications.",
   });
 }

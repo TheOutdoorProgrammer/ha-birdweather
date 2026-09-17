@@ -24,14 +24,14 @@ graph TB
         Const["const.py<br/>conf keys + tuning constants"]
     end
     subgraph User-facing
-        Sensors["sensor.py + binary_sensor.py<br/>15 sensors + PUC hardware + 1 binary sensor<br/>(entity.py: shared device-info base)"]
-        Cards["www/*.js<br/>bird-card + bird-list-card"]
+        Sensors["sensor.py + binary_sensor.py<br/>17 sensors + PUC hardware + 1 binary sensor<br/>(entity.py: shared device-info base)"]
+        Cards["www/*.js<br/>bird-card + bird-list-card + shared wildlife helpers"]
         Diag["diagnostics.py<br/>redacted bundle"]
-        Triggers["device_trigger.py<br/>3 device triggers"]
+        Triggers["device_trigger.py<br/>10 device triggers"]
     end
     subgraph External
         API["app.birdweather.com/graphql"]
-        HAStore["HA .storage/<br/>6 JSON files"]
+        HAStore["HA .storage/<br/>7 JSON files"]
     end
 
     ConfigFlow -- "validates station (client.py)" --> API
@@ -60,20 +60,21 @@ custom_components/birdweather/
 ├── config_flow.py        # config flow (station discovery) + options flow
 ├── const.py              # domain, conf keys, tuning constants, event/trigger names
 ├── coordinator.py        # BirdWeatherCoordinator: the poll orchestration
-├── device_trigger.py     # new_species / unusual_visitor / watched_species device triggers
+├── device_trigger.py     # species, bat-detection and bat-behavior device triggers
 ├── diagnostics.py        # redacted state dump
 ├── entity.py             # BirdWeatherEntity: shared device-info base for the platforms
 ├── manifest.json         # HACS manifest (version stamped on release)
 ├── normalize.py          # pure response parsing, rarity/notability scoring, link URLs
 ├── statistics.py         # long-term-statistics backfill (recorder external statistics)
-├── sensor.py             # 15 sensor classes + conditional PUC hardware sensors
+├── sensor.py             # 17 sensors + conditional PUC hardware sensors
 ├── strings.json          # translation keys -> display names
 ├── translations/
 │   └── en.json
 ├── brand/                # logo/icon
 └── www/
-    ├── birdweather-bird-card.js     # single-bird card
-    └── birdweather-details-card.js  # ranked list card
+    ├── birdweather-bird-card.js     # single-identification card
+    ├── birdweather-details-card.js  # ranked list card
+    └── birdweather-wildlife.js      # shared filtering, identity and bat presentation
 ```
 
 ## The coordinator orchestrates; supporting modules do the work
@@ -111,10 +112,39 @@ the notability pass is last so its recency component has the full 24-hour list.
 The coordinator returns a single `dict[str, Any]` per poll; most keys mirror
 sensor IDs. The deliberate exceptions: singular records (`last_detection`,
 `notable_detection`, `new_detection`) vs their plural lists; `recent_events` (the
-per-event buffer behind `last_detection`); and `lifetime_species_count` (a scalar
-on `new_species`). This key set is the contract between coordinator and sensors —
+per-event buffer behind `last_detection`); `last_bat_detection` and its
+`bat_events` list; and `lifetime_species_count` (a scalar on `new_species`). This
+key set is the contract between coordinator and sensors;
 adding a sensor means adding one dict key and one sensor class that agree on the
 name.
+
+### Bat identity and event processing
+
+The client preserves BirdWeather's `species_id`, `detection_id` and
+`classification` alongside display names. Feed normalization and event
+deduplication prefer those IDs when present, so an empty eBird code does not
+merge all bats together. Species metadata includes `avian` or `bat`
+classification; bird-reference links are suppressed for bats. The API supplies
+no taxonomic rank, and the integration does not infer one.
+
+Event metadata includes behavior, behavior code, behavior confidence and a
+shortlist of alternative identifications with weights. A grouped record takes
+these fields from its latest event. Shortlist candidates never become extra
+detections or additional species counts.
+
+The client fetches at most 300 recent detections in three cursor pages of up to
+100. It stops on empty or non-progressing pages and invalid/repeated cursors.
+The coordinator derives its recent and daily feed windows from that bounded
+sample. Station-wide aggregates continue to use BirdWeather's native queries;
+the new bat-only sensors do not narrow their scope.
+
+Bat events have a separate 50-event cache. `_update_bats` compares incoming
+event timestamps and IDs against a persisted watermark, saves the new state,
+then emits eligible events. First setup establishes the watermark silently.
+Repeated detections do not replay on later polls or restarts; unseen newer
+events can still alert. Both generic and behavior triggers use identification
+confidence for `alert_min_confidence`. The sample limit means events can be
+missed between polls, so this is not a complete event-delivery log.
 
 ## State and persistence
 
@@ -129,7 +159,7 @@ The rarity baseline (`topSpecies`), the diel histogram, and the
 statistics-imported date — each refreshed once per calendar day and kept between
 polls.
 
-### 3. Persisted (`.storage/`, six files per station)
+### 3. Persisted (`.storage/`, seven files per station)
 
 | Store | Rehydrated by | Contents |
 |---|---|---|
@@ -138,22 +168,30 @@ polls.
 | `birdweather.<id>.yearly` | `_async_setup` | the rarity baseline ranks |
 | `birdweather.<id>.seven_day` | `_async_setup` | per-day records for the 7-day `rarest_species` window (hot) |
 | `birdweather.<id>.recent_events` | `_async_setup` | rolling 50-event buffer behind `last_detection` (hot) |
-| `birdweather.<id>.species_meta` | `_async_setup` | the five cold per-species maps (codes, scientific names, image URLs, photo attribution, reference links) |
+| `birdweather.<id>.bat_events` | `_async_setup` | independent 50-bat-event buffer, alert watermark and event IDs at the watermark |
+| `birdweather.<id>.species_meta` | `_async_setup` | species identity/classification metadata and cold lookup maps (codes, scientific names, images, attribution, links) |
 
 Each store is written only when its data changes, gated by a dirty flag. The
 split is deliberate: HA's `Store` rewrites the whole file on any change, so the
-**hot** stores (`last_seen`, `seven_day`, `recent_events`) and the precious
-`seen_species` log are kept apart from the **cold** per-species maps — which
+hot stores (`last_seen`, `seven_day`, `recent_events`, `bat_events`) and the
+`seen_species` log are kept apart from the cold per-species maps, which
 change only when a new species is first seen and so share one `species_meta`
-store (one write instead of five). There's **no on-disk media cache**: bird
+store (one write instead of five). There is no on-disk media cache: wildlife
 photos are remote BirdWeather CDN URLs the cards load directly, and audio streams
 the soundscape clip in the browser.
+
+The bat cache is independent of the combined event buffer, so daytime birds
+cannot evict the last bat. It retains raw events while the displayed view
+applies the current feed-confidence and audio options. The watermark advances
+even for events below the alert threshold, preventing a later options change
+from replaying them.
 
 ### Store migrations
 On first load after upgrade, `_load_stores` migrates the five legacy per-map
 stores into `species_meta` (then removes them) and cleans up the legacy `.sticky`
 store (superseded by the event buffer + live notable). `async_remove_entry`
-deletes all of a station's stores — live and legacy — when the entry is removed.
+deletes all of a station's stores, including `bat_events` and the legacy files,
+when the entry is removed.
 
 ## Lifecycle
 
@@ -177,7 +215,7 @@ sequenceDiagram
     HA->>Init: async_setup_entry(entry)
     Init->>Coord: construct(hass, entry)  # poll interval from options
     Init->>Coord: async_config_entry_first_refresh()
-    Coord->>Coord: _async_setup (load 6 stores) + first poll
+    Coord->>Coord: _async_setup (load 7 stores) + first poll
     Init->>HA: entry.add_update_listener(_async_options_updated)
     Init->>HA: forward to sensor + binary_sensor platforms
 
@@ -205,27 +243,34 @@ a harmless extra key before it became a defined field in 2025.11.)
 ## Custom cards
 
 Two cards live in `www/` and register automatically in `async_setup`:
-`birdweather-bird-card` (single-bird tile, with an ⓘ button that pops up the
+`birdweather-bird-card` (single-identification tile, with an ⓘ button that opens the
 detail view) and `birdweather-bird-list-card` (ranked list with tap-to-expand
 rows, confidence chips, Wikipedia descriptions, a diel sparkline, reference-link
 buttons, and an optional play-the-call button). They read sensor state over HA's
-WebSocket — no knowledge of the coordinator — and are versioned via the `?v=`
+WebSocket without calling the coordinator, and are versioned via the `?v=`
 query string so a browser picks up new JS after an upgrade.
 
-The cards are **generated from the canonical Haikubox cards** by
-`scripts/sync-cards.sh` (brand substitution + a small feature flip), with the
-BirdWeather reference link re-applied by hand. See [docs/cards.md](cards.md).
+The cards are maintained in this repository. They share classification filters,
+stable identity helpers, bat placeholders, behavior labels and shortlist
+rendering through `birdweather-wildlife.js`. The former Haikubox synchronization
+script has been removed. See [docs/cards.md](cards.md) and
+[ADR 0001](../adr/0001-maintain-wildlife-cards-in-this-fork.md) for the
+maintenance trade-off.
+
+Audio uses the original BirdWeather soundscape URL. A tested BAT PUC recording
+was 250 kHz FLAC. The cards do not perform time expansion or frequency shifting;
+native ultrasonic playback may be inaudible or unsupported.
 
 ## Automation events
 
 The coordinator fires one bus event, `birdweather_event`, for noteworthy
-detections, discriminated by a `type` field (`new_species` / `unusual_visitor` /
-`watched_species`) — the one-event-many-types convention HA uses for
-`deconz_event` / `bthome_ble_event`. [`device_trigger.py`](../custom_components/birdweather/device_trigger.py)
-exposes all three as device triggers by delegating to the core event-trigger
+detections, distinguished by a `type` field. The ten types are `new_species`,
+`unusual_visitor`, `watched_species`, `bat_detected` and six bat behavior codes
+listed in [automations.md](automations.md). [`device_trigger.py`](../custom_components/birdweather/device_trigger.py)
+exposes them as device triggers by delegating to the core event-trigger
 platform, filtered to this device's `birdweather_event` of the requested type.
 The four blueprints under `blueprints/automation/birdweather/` are worked
-examples — see [docs/automations.md](automations.md).
+examples; see [docs/automations.md](automations.md).
 
 ## Design choices worth knowing
 

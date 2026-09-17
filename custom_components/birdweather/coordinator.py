@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .client import BirdWeatherClient, BirdWeatherError
 from .const import (
     ACTIVITY_BASELINE_DAYS,
+    BAT_BEHAVIORS,
     CONF_ABSENCE_DAYS,
     CONF_ALERT_MIN_CONFIDENCE,
     CONF_AUDIO_ENABLED,
@@ -45,17 +46,20 @@ from .const import (
     NOTABILITY_WINDOW_HOURS,
     RARITY_PERIOD_MONTHS,
     RECENT_WINDOW_HOURS,
+    TRIGGER_BAT_DETECTED,
     TRIGGER_NEW_SPECIES,
     TRIGGER_UNUSUAL_VISITOR,
     TRIGGER_WATCHED_SPECIES,
 )
 from .normalize import (
     _ATTR_KEYS,
+    _WILDLIFE_KEYS,
     _allaboutbirds_url,
     _apply_notability_scores,
     _apply_rarity_scores,
     _build_recent_events,
     _ebird_url,
+    _event_key,
     _filter_by_confidence,
     _filter_by_dt,
     _first_seen_per_species,
@@ -65,6 +69,7 @@ from .normalize import (
     _peak_hour,
     _process_baseline_count,
     _ranked,
+    _species_key,
 )
 from .statistics import async_import_history_statistics
 
@@ -81,6 +86,7 @@ _STORE_SUFFIXES = (
     "seven_day",
     "recent_events",
     "species_meta",
+    "bat_events",
 )
 
 # Legacy per-station stores from earlier versions: the five cold maps now folded
@@ -140,6 +146,7 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # so refreshed once per calendar day. `by_species` maps common name → a
         # 24-bucket hourly count array; `station` is the summed station-wide curve.
         self._diel_by_species: dict[str, list[int]] = {}
+        self._diel_by_species_id: dict[str, list[int]] = {}
         self._diel_station: list[int] = []
         self._diel_fetched_date: date | None = None
 
@@ -154,6 +161,8 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # last_detection state. notable_species is deliberately NOT sticky — it's
         # "notable observed in the last 24 h", so it drains with its window.
         self._event_buffer: list[dict[str, Any]] = []
+        self._bat_state: dict[str, Any] = {}
+        self._species_metadata: dict[str, dict[str, Any]] = {}
 
         # Persistent stores
         self._store           = Store(hass, _STORE_VERSION, f"{DOMAIN}.{station_id}.seen_species")
@@ -161,12 +170,8 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._yearly_store     = Store(hass, _STORE_VERSION, f"{DOMAIN}.{station_id}.yearly")
         self._seven_day_store  = Store(hass, _STORE_VERSION, f"{DOMAIN}.{station_id}.seven_day")
         self._events_store     = Store(hass, _STORE_VERSION, f"{DOMAIN}.{station_id}.recent_events")
-        # The five cold per-species lookup maps (sp_codes, sci_names, image_urls,
-        # image_attr, links) change together (when a new species is first seen)
-        # and are static otherwise, so they share one store rather than five —
-        # fewer files and one write instead of five. They stay separate dicts in
-        # memory; only persistence is consolidated. (Migrated from the old
-        # per-map stores on first load — see _load_stores.)
+        self._bat_store = Store(hass, _STORE_VERSION, f"{DOMAIN}.{station_id}.bat_events")
+        # Per-species lookups share a store because they change together.
         self._meta_store       = Store(hass, _STORE_VERSION, f"{DOMAIN}.{station_id}.species_meta")
 
         # In-memory store state
@@ -174,10 +179,8 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sp_codes: dict[str, str] = {}           # species → sp_code
         self._sci_names: dict[str, str] = {}          # species → scientific_name
         self._last_seen: dict[str, str] = {}          # species → last_seen ISO
-        self._image_urls: dict[str, str] = {}         # sp_code → image URL
-        # sp_code → {image_credit, image_credit_url, image_license, image_license_url}
+        self._image_urls: dict[str, str] = {}
         self._image_attr: dict[str, dict[str, Any]] = {}
-        # sp_code → {ebird_url, wikipedia_url} (upstream URLs BirdWeather supplies)
         self._links_cache: dict[str, dict[str, Any]] = {}
         self._baseline_items: list[dict[str, Any]] = []
         self._seven_day_data: dict[str, list] = {}
@@ -194,32 +197,44 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._load_stores()
 
     def _merge_event_buffer(self, poll_events: list[dict[str, Any]]) -> bool:
-        """Merge this poll's events into the rolling last-N buffer that backs
-        last_detection. De-duped by (sp_code, last_seen), newest-first, capped at
-        LAST_DETECTION_EVENT_LIMIT. Returns whether the buffer changed (→ persist).
-        """
-        existing = {(e.get("sp_code"), e.get("last_seen")) for e in self._event_buffer}
-        added = False
-        for ev in poll_events:
-            key = (ev.get("sp_code"), ev.get("last_seen"))
-            if ev.get("last_seen") and key not in existing:
-                self._event_buffer.append(dict(ev))
-                existing.add(key)
-                added = True
-        if added:
-            self._event_buffer.sort(key=lambda e: e.get("last_seen") or "", reverse=True)
-            del self._event_buffer[LAST_DETECTION_EVENT_LIMIT:]
-        return added
+        merged = self._merge_events(self._event_buffer, poll_events)
+        changed = merged != self._event_buffer
+        self._event_buffer = merged
+        return changed
 
-    def _buffer_view(self, audio_enabled: bool) -> list[dict[str, Any]]:
+    @staticmethod
+    def _merge_events(existing: list[dict], incoming: list[dict]) -> list[dict]:
+        records = {
+            _event_key(e): dict(e) for e in existing if _parse_dt(e.get("last_seen"))
+        }
+        for event in incoming:
+            if not _parse_dt(event.get("last_seen")):
+                continue
+            # Upgrade legacy buffered events without replaying them under a new ID.
+            for key, old in list(records.items()):
+                if (
+                    not old.get("detection_id") and event.get("detection_id")
+                    and old.get("species") == event.get("species")
+                    and _parse_dt(old.get("last_seen")) == _parse_dt(event.get("last_seen"))
+                ):
+                    del records[key]
+            records[_event_key(event)] = dict(event)
+        ordered = sorted(
+            records.values(), key=lambda e: _parse_dt(e["last_seen"]), reverse=True
+        )
+        return ordered[:LAST_DETECTION_EVENT_LIMIT]
+
+    def _buffer_view(
+        self, audio_enabled: bool, events: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """Display copies of the event buffer for last_detection: fresh image_url
         (a species' photo may have been cached after the event was buffered) and
         current rarity scores, without mutating the stored buffer. audio_url is
         gated on the current audio_enabled option so toggling audio off hides the
         play button; _with_links (applied by the caller) stamps reference links."""
-        view = [dict(e) for e in self._event_buffer]
+        view = [dict(e) for e in (self._event_buffer if events is None else events)]
         for e in view:
-            img = self._image_urls.get(e.get("sp_code"))
+            img = self._image_urls.get(_species_key(e))
             if img:
                 e["image_url"] = img
             if not audio_enabled:
@@ -228,13 +243,14 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return view
 
     async def _save_meta(self) -> None:
-        """Persist the five cold per-species maps as one species_meta store."""
+        """Persist per-species lookups together."""
         await self._meta_store.async_save({
             "sp_codes": self._sp_codes,
             "sci_names": self._sci_names,
             "image_urls": self._image_urls,
             "image_attr": self._image_attr,
             "links": self._links_cache,
+            "species": self._species_metadata,
         })
 
     @staticmethod
@@ -284,6 +300,7 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.station_id, days=DIEL_WINDOW_DAYS
                 )
                 self._diel_by_species = diel["by_species"]
+                self._diel_by_species_id = diel.get("by_species_id", {})
                 self._diel_station = diel["station"]
                 self._diel_fetched_date = today
             except (aiohttp.ClientError, BirdWeatherError) as err:
@@ -335,49 +352,22 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         _apply_rarity_scores(daily_count, self._baseline_ranks, self._baseline_species_count)
 
-        # Cache the upstream eBird/Wikipedia URLs BirdWeather supplies, keyed by
-        # sp_code and persisted, so store-built lists (watch-list, baseline,
-        # new-species) keep links for species not heard this session. eBird
-        # falls back to a template; Wikipedia has no template, so this is its
-        # only source.
-        # The five cold per-species maps share one species_meta store; meta_dirty
-        # tracks a change to any of them across the whole poll and they're saved
-        # once, below, after the last one (today_top) is updated.
         meta_dirty = False
+        for record in self._baseline_items:
+            meta_dirty = self._cache_species_metadata(record) or meta_dirty
         for item in daily_raw["detections"]:
-            code = item.get("spCode") or ""
-            if not code:
-                continue
-            links = {
-                "ebird_url": item.get("ebird_url"),
-                "wikipedia_url": item.get("wikipedia_url"),
-                "birdweather_url": item.get("birdweather_url"),
-                "alpha": item.get("alpha"),
-                "alpha6": item.get("alpha6"),
+            record = {
+                **item, "species": item.get("cn"), "scientific_name": item.get("sn"),
+                "sp_code": item.get("spCode"), "image_url": item.get("image"),
             }
-            if any(links.values()) and self._links_cache.get(code) != links:
-                self._links_cache[code] = links
-                meta_dirty = True
+            meta_dirty = self._cache_species_metadata(record) or meta_dirty
 
         # Snapshot last_seen before the update loop (for absence-gap measuring).
         prior_last_seen = dict(self._last_seen)
 
-        # Update sp_codes / scientific_name / last_seen / image lookups.
         last_seen_dirty = False
         for d in detections:
             sp = d["species"]
-            if d.get("sp_code") and sp not in self._sp_codes:
-                self._sp_codes[sp] = d["sp_code"]
-                meta_dirty = True
-            if d.get("scientific_name") and sp not in self._sci_names:
-                self._sci_names[sp] = d["scientific_name"]
-                meta_dirty = True
-            if d.get("sp_code") and d.get("image_url"):
-                if self._image_urls.get(d["sp_code"]) != d["image_url"]:
-                    self._image_urls[d["sp_code"]] = d["image_url"]
-                    meta_dirty = True
-            if self._cache_image_attr(d.get("sp_code", ""), d):
-                meta_dirty = True
             ts = d.get("last_seen")
             if ts and ts > self._last_seen.get(sp, ""):
                 self._last_seen[sp] = ts
@@ -392,18 +382,6 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sp = d["species"]
                 if not sp:
                     continue
-                if d.get("sp_code"):
-                    if sp not in self._sp_codes:
-                        self._sp_codes[sp] = d["sp_code"]
-                        meta_dirty = True
-                    if d.get("image_url") and self._image_urls.get(d["sp_code"]) != d["image_url"]:
-                        self._image_urls[d["sp_code"]] = d["image_url"]
-                        meta_dirty = True
-                if self._cache_image_attr(d.get("sp_code", ""), d):
-                    meta_dirty = True
-                if d.get("scientific_name") and sp not in self._sci_names:
-                    self._sci_names[sp] = d["scientific_name"]
-                    meta_dirty = True
                 ts = d.get("last_seen")
                 if ts and ts > self._last_seen.get(sp, ""):
                     self._last_seen[sp] = ts
@@ -448,11 +426,13 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._baseline_ranks,
             self._baseline_species_count,
             self._image_urls.get,
-            LAST_DETECTION_EVENT_LIMIT,
+            DETECTION_FETCH_LIMIT,
             audio_enabled,
         )
         if self._merge_event_buffer(poll_events):
             await self._events_store.async_save(self._event_buffer)
+
+        await self._update_bats(poll_events)
 
         self._fire_detection_events(detections, newly_seen, prior_last_seen)
 
@@ -507,8 +487,7 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         today_top = list(overview.get("today_top") or [])
         for rec in today_top:
             rec["last_seen"] = self._last_seen.get(rec["species"])
-            if self._cache_image_attr(rec.get("sp_code", ""), rec):
-                meta_dirty = True
+            meta_dirty = self._cache_species_metadata(rec) or meta_dirty
         # today_top is the last writer of the cold maps this poll, so persist the
         # consolidated species_meta store once here for all of them.
         if meta_dirty:
@@ -520,6 +499,9 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # live — head + list drain to None / [] with the 24h window.
         recent_events_out = _ranked(self._with_links(self._buffer_view(audio_enabled)))
         notable_out = _ranked(self._with_links(notable))
+        bat_events = self._with_links(
+            self._buffer_view(audio_enabled, self._bat_state.get("events", []))
+        )
 
         # Stamp reference-link URLs (eBird/Wikipedia/All About Birds) onto every
         # card-facing list, so the cards render links without constructing URLs.
@@ -527,6 +509,9 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "recent_detections": _ranked(self._with_links(detections)),
             "last_detection": recent_events_out[0] if recent_events_out else None,
             "recent_events": recent_events_out,
+            "recent_bats": _ranked(self._with_links([d for d in detections if d.get("classification") == "bat"])),
+            "last_bat_detection": bat_events[0] if bat_events else None,
+            "bat_events": _ranked(bat_events),
             "notable_detection": notable_out[0] if notable_out else None,
             # The trailing-24h detection list still feeds the 7-day rarest
             # rollup, notability, and the extended-silence sensor. Distinct key
@@ -558,6 +543,45 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
     # Automation events
     # ------------------------------------------------------------------
+
+    async def _update_bats(self, events: list[dict[str, Any]]) -> None:
+        bats = [
+            e for e in events
+            if e.get("classification") == "bat" and _parse_dt(e.get("last_seen"))
+        ]
+        prior = self._bat_state
+        watermark = _parse_dt(prior.get("last_seen"))
+        keys = set(prior.get("last_keys") or [])
+        pending = []
+        latest = watermark or datetime.now(UTC)
+        latest_keys = set(keys)
+        threshold = self.config_entry.options.get(
+            CONF_ALERT_MIN_CONFIDENCE, DEFAULT_ALERT_MIN_CONFIDENCE
+        ) / 100.0
+        for event in sorted(bats, key=lambda e: _parse_dt(e["last_seen"])):
+            timestamp = _parse_dt(event["last_seen"])
+            key = _event_key(event)
+            if watermark is not None and (
+                timestamp > watermark or (timestamp == watermark and key not in keys)
+            ):
+                confidence = event.get("confidence")
+                if not threshold or (isinstance(confidence, (float, int)) and confidence >= threshold):
+                    pending.append(event)
+            if timestamp > latest:
+                latest, latest_keys = timestamp, {key}
+            elif timestamp == latest:
+                latest_keys.add(key)
+        state = {
+            "events": self._merge_events(prior.get("events", []), bats),
+            "last_seen": latest.isoformat(), "last_keys": sorted(latest_keys),
+        }
+        if state != prior:
+            await self._bat_store.async_save(state)
+            self._bat_state = state
+        for event in pending:
+            self._fire_event(TRIGGER_BAT_DETECTED, event)
+            if event.get("behavior_code") in BAT_BEHAVIORS:
+                self._fire_event(event["behavior_code"], event)
 
     def _fire_detection_events(
         self,
@@ -658,6 +682,7 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "last_seen": record.get("last_seen"),
                 "rarity_score": record.get("rarity_score"),
                 "yearly_rank": record.get("yearly_rank"),
+                **{key: record.get(key) for key in _WILDLIFE_KEYS},
                 **extra,
             },
         )
@@ -703,6 +728,20 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._image_urls  = _d("image_urls")
         self._image_attr  = _d("image_attr")
         self._links_cache = _d("links")
+        self._species_metadata = {
+            key: value for key, value in _d("species").items() if isinstance(value, dict)
+        }
+        bats = await self._bat_store.async_load()
+        self._bat_state = bats if isinstance(bats, dict) and isinstance(bats.get("events"), list) else {}
+        if self._bat_state:
+            if not isinstance(self._bat_state.get("last_keys"), list):
+                self._bat_state["last_keys"] = []
+            self._bat_state["last_keys"] = [
+                key for key in self._bat_state["last_keys"] if isinstance(key, str)
+            ]
+            self._bat_state["events"] = self._merge_events(
+                [e for e in self._bat_state["events"] if isinstance(e, dict)], []
+            )
 
         if migrated:
             await self._save_meta()
@@ -751,6 +790,8 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "yearly_rank": d.get("yearly_rank", 0),
                     "count": d.get("count", 0),
                     "last_seen": d.get("last_seen"),
+                    "species_id": d.get("species_id"),
+                    "classification": d.get("classification"),
                 }
                 dirty = True
 
@@ -783,23 +824,21 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Dataset builders (store-only, no API calls)
     # ------------------------------------------------------------------
 
-    def _cache_image_attr(self, sp_code: str, record: dict[str, Any]) -> bool:
-        """Remember a species' photo credit/license (keyed by sp_code) so sticky
-        and store-built records keep their attribution. Returns True if changed.
-        """
-        if not sp_code:
+    def _cache_image_attr(self, key: str, record: dict[str, Any]) -> bool:
+        """Cache photo attribution by species identity, including legacy codes."""
+        if not key:
             return False
         attr = {k: record.get(k) for k in _ATTR_KEYS}
         if not any(attr.values()):  # nothing worth caching yet
             return False
-        if self._image_attr.get(sp_code) != attr:
-            self._image_attr[sp_code] = attr
+        if self._image_attr.get(key) != attr:
+            self._image_attr[key] = attr
             return True
         return False
 
-    def _image_attribution(self, sp_code: str) -> dict[str, Any]:
-        """Cached photo credit/license for a species code (None values if unknown)."""
-        attr = self._image_attr.get(sp_code) or {}
+    def _image_attribution(self, key: str) -> dict[str, Any]:
+        """Cached photo attribution, with None values for unknown fields."""
+        attr = self._image_attr.get(key) or {}
         return {k: attr.get(k) for k in _ATTR_KEYS}
 
     async def _import_history_statistics(self, today: date, earliest_iso: str) -> None:
@@ -823,12 +862,15 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         upstream URL isn't cached yet. BirdWeather's species page has no template
         (it's a BirdWeather-only page), so it's only present once cached from the
         feed."""
-        cached = self._links_cache.get(sp_code) or {}
+        metadata = self._species_metadata.get(species, {})
+        key = _species_key({"species": species, "sp_code": sp_code, **metadata})
+        cached = self._links_cache.get(key) or self._links_cache.get(sp_code) or {}
+        avian = metadata.get("classification", "avian" if sp_code else None) == "avian"
         return {
-            "ebird_url": cached.get("ebird_url") or _ebird_url(sp_code),
+            "ebird_url": (cached.get("ebird_url") or _ebird_url(sp_code)) if avian else None,
             "wikipedia_url": cached.get("wikipedia_url"),
-            "allaboutbirds_url": _allaboutbirds_url(species),
-            "macaulay_url": _ml_url(sp_code),
+            "allaboutbirds_url": _allaboutbirds_url(species) if avian else None,
+            "macaulay_url": _ml_url(sp_code) if avian else None,
             "birdweather_url": cached.get("birdweather_url"),
             # Alpha banding codes ride along on the same per-species cache so the
             # detail-view chip is consistent across every card list (incl. the
@@ -841,8 +883,20 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Stamp per-species metadata onto each record: reference-link URLs plus
         the diel `hourly` activity array (24 buckets) for the card's sparkline."""
         for r in records:
+            for key, value in self._species_metadata.get(r.get("species", ""), {}).items():
+                if not r.get(key):
+                    r[key] = value
+            key = _species_key(r)
+            if not r.get("image_url"):
+                r["image_url"] = self._image_urls.get(key)
+            for field, value in self._image_attribution(key).items():
+                if not r.get(field):
+                    r[field] = value
             r.update(self._links_for(r.get("species", ""), r.get("sp_code", "")))
-            r["hourly"] = self._diel_by_species.get(r.get("species", ""))
+            r["hourly"] = (
+                self._diel_by_species_id.get(str(r.get("species_id")))
+                or self._diel_by_species.get(r.get("species", ""))
+            )
         return records
 
     def _build_baseline_top(self) -> list[dict[str, Any]]:
@@ -886,7 +940,7 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _build_last_new_species(self) -> dict[str, Any] | None:
         history = self._build_new_species_history()
-        return history[0] if history else None
+        return self._with_links(history[:1])[0] if history else None
 
     def _build_watched(self) -> list[dict[str, Any]]:
         """Watch-list species this station has detected, most-recently-heard
@@ -932,3 +986,35 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def lifetime_species_count(self) -> int:
         return len(self._seen_species)
+
+    def _cache_species_metadata(self, record: dict[str, Any]) -> bool:
+        species = record.get("species")
+        if not species:
+            return False
+        metadata = {**self._species_metadata.get(species, {})}
+        for field in ("species_id", "classification", "scientific_name", "sp_code"):
+            if record.get(field):
+                metadata[field] = record[field]
+        changed = self._species_metadata.get(species) != metadata
+        self._species_metadata[species] = metadata
+        for field, cache in (("sp_code", self._sp_codes), ("scientific_name", self._sci_names)):
+            if metadata.get(field) and cache.get(species) != metadata[field]:
+                cache[species] = metadata[field]
+                changed = True
+        key = _species_key({**record, **metadata})
+        legacy = record.get("sp_code")
+        for cache in (self._image_urls, self._image_attr, self._links_cache):
+            if legacy and legacy != key and legacy in cache and key not in cache:
+                cache[key] = cache[legacy]
+                changed = True
+        if record.get("image_url") and self._image_urls.get(key) != record["image_url"]:
+            self._image_urls[key] = record["image_url"]
+            changed = True
+        links = dict(self._links_cache.get(key, {}))
+        for field in ("ebird_url", "wikipedia_url", "birdweather_url", "alpha", "alpha6"):
+            if record.get(field):
+                links[field] = record[field]
+        if links and self._links_cache.get(key) != links:
+            self._links_cache[key] = links
+            changed = True
+        return self._cache_image_attr(key, record) or changed

@@ -1,6 +1,7 @@
 # Custom cards
 
-The integration registers two custom Lovelace cards automatically — no manual resource configuration required.
+The integration registers two custom Lovelace cards automatically. Existing card
+type names remain compatible, and both support bird and bat detections.
 
 - [`birdweather-bird-card`](#birdweather-bird-card) — single bird, photo + species + relative timestamp
 - [`birdweather-bird-list-card`](#birdweather-bird-list-card) — ranked list with tap-to-expand detail rows
@@ -9,7 +10,43 @@ The integration registers two custom Lovelace cards automatically — no manual 
 - [Theming](#theming)
 - [Troubleshooting](#troubleshooting)
 
-Both cards work on **Home Assistant 2025.4+** (the integration's minimum). They share their render logic with the sibling Haikubox cards — they're generated from the canonical Haikubox cards by `scripts/sync-cards.sh`, with BirdWeather's reference link layered back on (see [contributing.md](contributing.md)).
+Both cards work on **Home Assistant 2025.4+**. This fork maintains their source
+directly and shares wildlife formatting in `birdweather-wildlife.js`; see
+[contributing.md](contributing.md).
+
+## Bat views
+
+Set `classification` to `all` (default), `bat`, or `bird` in YAML or the visual
+editor. The filter runs before `position` and `top`, and follows the card into
+its popup. BirdWeather's `avian` classification is treated as `bird`.
+
+```yaml
+type: custom:birdweather-bird-card
+entity: sensor.backyard_last_bat_detection
+classification: bat
+```
+
+```yaml
+type: custom:birdweather-bird-list-card
+entity: sensor.backyard_recent_bats
+classification: bat
+title: Recent bats
+top: 10
+```
+
+Bats get a bat badge and a bat placeholder when no photo is available. Details
+show the latest reported behavior with its confidence, plus candidate
+identifications and their weights. Candidates describe alternatives for one
+detection; they are not additional sightings or calibrated probabilities.
+Broader labels such as "Bats" stay as BirdWeather reports them. The API does
+not supply a taxonomy rank.
+
+The card filter only changes the displayed records. Station totals, diversity
+and activity sensors still include every classification. Bat detections link to
+BirdWeather and Wikipedia when available; bird reference links are omitted.
+
+Audio uses the original recording. BAT PUC recordings can contain ultrasound
+that is inaudible at original speed. Time expansion is not implemented.
 
 ---
 
@@ -27,7 +64,11 @@ grid_options:
 
 The card is fully responsive to width and height: in portrait the photo fills the card width over an edge-to-edge blurred fill (BirdWeather photos are 1:1 squares), with text centred below; when wider than ~3:2 the photo moves left and text appears on the right. Text scales with the card via container-query units. Two round overlay buttons sit at the **top** corners (clear of the bottom photo-credit strip): **▶ play** (top-left, when audio is enabled and a recording exists) and **ⓘ details** (top-right) — see below.
 
-Works with any **list-bearing** sensor — the 8 that expose a per-species `detections` list (`recent_detections`, `last_detection`, `daily_top_species`, `notable_species`, `new_species`, `yearly_top_species`, `rarest_species`, `watched_species`). The numeric/diagnostic sensors (`daily_count`, `lifetime_species`, `species_diversity`, `activity_level`, `new_species_window`, `history_start`, `peak_activity_hour`) have no list and aren't offered. By default the card renders the **top-ranked** record. Empty list → "No recent detections."
+Works with any list-bearing sensor: `recent_detections`, `last_detection`,
+`recent_bats`, `last_bat_detection`, `daily_top_species`, `notable_species`,
+`new_species`, `yearly_top_species`, `rarest_species`, or `watched_species`.
+Numeric and diagnostic sensors without `detections` are not offered. By default
+the card renders the first record. An empty list shows "No recent detections."
 
 The relative timestamp refreshes every 60 seconds independently of the poll cadence, so it stays honest between polls.
 
@@ -63,6 +104,7 @@ Supported actions: `more-info` (**default**), `show-list` (popup of the full spe
 | `{species}` | Common name (e.g. `Downy Woodpecker`) |
 | `{species_slug}` | Common name, spaces → underscores (`Downy_Woodpecker`) |
 | `{sp_code}` | eBird species code (e.g. `dowwoo`) |
+| `{species_id}` | BirdWeather species identifier, including bats |
 | `{scientific_name}` | Latin binomial |
 
 ```yaml

@@ -16,6 +16,28 @@ from .const import CONFIDENCE_BAND_HIGH, CONFIDENCE_BAND_LOW
 # Photo credit/license keys threaded from the client onto every record so the
 # cards can show attribution (CC BY-SA images require it).
 _ATTR_KEYS = ("image_credit", "image_credit_url", "image_license", "image_license_url")
+_WILDLIFE_KEYS = (
+    "detection_id", "species_id", "classification", "behavior", "behavior_code",
+    "behavior_confidence", "shortlist",
+)
+
+
+def _species_key(record: dict[str, Any]) -> str:
+    if record.get("species_id") is not None:
+        return f"birdweather:{record['species_id']}"
+    if code := record.get("sp_code") or record.get("spCode"):
+        return str(code)
+    if scientific := record.get("scientific_name") or record.get("sn"):
+        return f"scientific:{scientific.casefold()}"
+    return f"name:{(record.get('species') or record.get('cn') or 'Unknown').casefold()}"
+
+
+def _event_key(record: dict[str, Any]) -> str:
+    if record.get("detection_id") is not None:
+        return f"detection:{record['detection_id']}"
+    timestamp = _parse_dt(record.get("last_seen") or record.get("dt"))
+    stamp = timestamp.astimezone(UTC).isoformat() if timestamp else ""
+    return f"{_species_key(record)}|{stamp}"
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -133,7 +155,7 @@ def _normalise_detections(
         if not isinstance(item, dict):
             continue
         sp_code = item.get("spCode", "")
-        key = sp_code or item.get("cn", "Unknown")
+        key = _species_key(item)
         dt_str = item.get("dt")
         parsed = _parse_dt(dt_str)
 
@@ -154,6 +176,7 @@ def _normalise_detections(
                 "rarity_score": 0.0,
                 "yearly_rank": 0,
                 **{k: item.get(k) for k in _ATTR_KEYS},
+                **{k: item.get(k) for k in _WILDLIFE_KEYS},
             }
         rec = by_species[key]
         rec["count"] += 1
@@ -164,6 +187,7 @@ def _normalise_detections(
             rec["audio_url"] = item.get("audio") if audio_enabled else None
             rec["confidence"] = item.get("confidence")
             rec["confidence_band"] = _confidence_band(item.get("confidence"))
+            rec.update({k: item.get(k) for k in _WILDLIFE_KEYS})
             if item.get("image"):
                 rec["image_url"] = item.get("image")
 
@@ -218,7 +242,12 @@ def _process_baseline_count(raw: Any) -> tuple[dict[str, int], int, list[dict[st
             continue
         rank = idx + 1
         ranks[name] = rank
-        items.append({"species": name, "count": int(item.get("count", 0)), "rank": rank})
+        items.append({
+            **{key: value for key, value in item.items() if key != "bird"},
+            "species": name,
+            "count": int(item.get("count", 0)),
+            "rank": rank,
+        })
     return ranks, len(ranks), items
 
 
@@ -275,7 +304,7 @@ def _build_recent_events(
         if not isinstance(item, dict):
             continue
         dt_str = item.get("dt")
-        if not isinstance(dt_str, str) or not dt_str:
+        if _parse_dt(dt_str) is None:
             continue
         species = item.get("cn", "Unknown")
         sp_code = item.get("spCode", "")
@@ -286,7 +315,7 @@ def _build_recent_events(
             "sp_code": sp_code,
             "alpha": item.get("alpha"),
             "alpha6": item.get("alpha6"),
-            "image_url": item.get("image") or image_url_for(sp_code),
+            "image_url": item.get("image") or image_url_for(_species_key(item)) or image_url_for(sp_code),
             "last_seen": dt_str,
             "audio_url": item.get("audio") if audio_enabled else None,
             "confidence": item.get("confidence"),
@@ -294,6 +323,7 @@ def _build_recent_events(
             "rarity_score": round(rank / denom, 4),
             "yearly_rank": rank,
             **{k: item.get(k) for k in _ATTR_KEYS},
+            **{k: item.get(k) for k in _WILDLIFE_KEYS},
         })
-    events.sort(key=lambda e: e.get("last_seen") or "", reverse=True)
+    events.sort(key=lambda e: _parse_dt(e["last_seen"]), reverse=True)
     return events[:limit]

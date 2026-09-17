@@ -5,6 +5,7 @@
     "recorder"
   ],
   "codeowners": [
+    "@TheOutdoorProgrammer",
     "@eklundjon"
   ],
   "config_flow": true,
@@ -12,9 +13,9 @@
     "http",
     "frontend"
   ],
-  "documentation": "https://github.com/eklundjon/ha-birdweather",
+  "documentation": "https://github.com/TheOutdoorProgrammer/ha-birdweather",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/eklundjon/ha-birdweather/issues",
+  "issue_tracker": "https://github.com/TheOutdoorProgrammer/ha-birdweather/issues",
   "version": "0.5.0"
 }

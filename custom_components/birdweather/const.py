@@ -66,7 +66,22 @@ EVENT_BIRDWEATHER = "birdweather_event"
 TRIGGER_NEW_SPECIES = "new_species"
 TRIGGER_UNUSUAL_VISITOR = "unusual_visitor"
 TRIGGER_WATCHED_SPECIES = "watched_species"  # a user-chosen species was detected
-TRIGGER_TYPES = (TRIGGER_NEW_SPECIES, TRIGGER_UNUSUAL_VISITOR, TRIGGER_WATCHED_SPECIES)
+TRIGGER_BAT_DETECTED = "bat_detected"
+BAT_BEHAVIORS = {
+    "bat_search_open": "Searching in open space",
+    "bat_search_clutter": "Searching in clutter",
+    "bat_chase": "Chasing",
+    "bat_feeding_buzz": "Feeding buzz",
+    "bat_approach": "Approaching",
+    "bat_pass": "Passing",
+}
+TRIGGER_TYPES = (
+    TRIGGER_NEW_SPECIES,
+    TRIGGER_UNUSUAL_VISITOR,
+    TRIGGER_WATCHED_SPECIES,
+    TRIGGER_BAT_DETECTED,
+    *BAT_BEHAVIORS,
+)
 
 # unusual_visitor: known species reappearing after >= this many days unheard.
 CONF_ABSENCE_DAYS = "absence_days"

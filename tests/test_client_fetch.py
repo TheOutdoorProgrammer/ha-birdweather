@@ -1,12 +1,13 @@
 """Tests for the BirdWeatherClient data-fetch/parse methods.
 
-Each method issues one GraphQL query and shapes the response; these feed a
-canned `{"data": {...}}` payload through a fake session and assert the parse.
+Exercises GraphQL parsing and bounded detection pagination through a fake session.
 """
 
 from __future__ import annotations
 
 from datetime import date
+
+import pytest
 
 from custom_components.birdweather.client import BirdWeatherClient
 
@@ -31,9 +32,12 @@ class _Resp:
 class _Session:
     def __init__(self, data):
         self._data = data
+        self.requests = []
 
     def post(self, url, json=None, headers=None):
-        return _Resp({"data": self._data})
+        self.requests.append(json)
+        data = self._data.pop(0) if isinstance(self._data, list) else self._data
+        return _Resp({"data": data})
 
 
 def _client(data) -> BirdWeatherClient:
@@ -83,6 +87,127 @@ async def test_get_raw_detections_empty_station() -> None:
     assert await _client({"station": None}).get_raw_detections("1") == {"detections": []}
 
 
+def _detection_page(ids, *, cursor=None, has_next=False):
+    return {"station": {"detections": {
+        "nodes": [{"id": str(i), "species": _species("Robin")} for i in ids],
+        "pageInfo": {"endCursor": cursor, "hasNextPage": has_next},
+    }}}
+
+
+@pytest.mark.parametrize("method", ["get_detections", "get_raw_detections"])
+async def test_detection_pagination_respects_total_and_page_size(method) -> None:
+    session = _Session([
+        _detection_page(range(100), cursor="page-1", has_next=True),
+        _detection_page(range(100, 150), cursor="page-2", has_next=True),
+    ])
+    result = await getattr(BirdWeatherClient(session), method)("1", first=150)
+    rows = result["detections"] if isinstance(result, dict) else result
+    assert [r["detection_id"] for r in rows] == [str(i) for i in range(150)]
+    assert [r["variables"] for r in session.requests] == [
+        {"id": "1", "first": 100, "after": None},
+        {"id": "1", "first": 50, "after": "page-1"},
+    ]
+    assert "pageInfo { hasNextPage endCursor }" in session.requests[0]["query"]
+
+
+async def test_detection_pagination_deduplicates_overlapping_ids() -> None:
+    session = _Session([
+        _detection_page(range(100), cursor="page-1", has_next=True),
+        _detection_page([99, *range(100, 199)], cursor="page-2", has_next=True),
+    ])
+    result = await BirdWeatherClient(session).get_raw_detections("1", first=200)
+    assert [r["detection_id"] for r in result["detections"]] == [str(i) for i in range(199)]
+    assert len(session.requests) == 2
+
+
+@pytest.mark.parametrize("cursor", [None, "", 123])
+async def test_detection_pagination_stops_without_valid_cursor(cursor) -> None:
+    session = _Session([_detection_page(range(100), cursor=cursor, has_next=True)])
+    result = await BirdWeatherClient(session).get_raw_detections("1")
+    assert len(result["detections"]) == 100
+    assert len(session.requests) == 1
+
+
+@pytest.mark.parametrize("cursors", [["a", "a"], ["a", "b", "a"]])
+async def test_detection_pagination_stops_on_repeated_cursor(cursors) -> None:
+    session = _Session([
+        _detection_page(range(i * 100, (i + 1) * 100), cursor=cursor, has_next=True)
+        for i, cursor in enumerate(cursors)
+    ])
+    result = await BirdWeatherClient(session).get_raw_detections("1", first=400)
+    assert len(result["detections"]) == len(cursors) * 100
+    assert len(session.requests) == len(cursors)
+
+
+@pytest.mark.parametrize("second_ids", [[], range(100)])
+async def test_detection_pagination_stops_without_new_data(second_ids) -> None:
+    session = _Session([
+        _detection_page(range(100), cursor="a", has_next=True),
+        _detection_page(second_ids, cursor="b", has_next=True),
+    ])
+    result = await BirdWeatherClient(session).get_raw_detections("1")
+    assert len(result["detections"]) == 100
+    assert len(session.requests) == 2
+
+
+async def test_detection_pagination_request_budget_handles_short_pages() -> None:
+    session = _Session([
+        _detection_page([i], cursor=str(i), has_next=True) for i in range(3)
+    ])
+    result = await BirdWeatherClient(session).get_raw_detections("1")
+    assert len(result["detections"]) == 3
+    assert len(session.requests) == 3
+
+
+@pytest.mark.parametrize("first", [0, -1])
+async def test_detection_pagination_nonpositive_limit_does_not_fetch(first) -> None:
+    session = _Session([])
+    assert await BirdWeatherClient(session).get_detections("1", first=first) == []
+    assert session.requests == []
+
+
+async def test_detection_pagination_truncates_oversized_response() -> None:
+    session = _Session([_detection_page(range(100))])
+    result = await BirdWeatherClient(session).get_detections("1", first=20)
+    assert len(result) == 20
+    assert session.requests[0]["variables"]["first"] == 20
+
+
+async def test_get_raw_detections_retains_bat_identity_and_behavior() -> None:
+    bat = {
+        "id": "bat-1", "classification": "bat", "commonName": "Big Brown Bat",
+        "scientificName": "Eptesicus fuscus", "ebirdCode": None, "alpha": None,
+        "imageUrl": None,
+    }
+    data = {"station": {"detections": {"nodes": [{
+        "id": "event-1", "species": bat, "confidence": 0.95,
+        "timestamp": "2026-09-17T02:00:00Z", "behavior": "Feeding buzz",
+        "behaviorCode": "feeding_buzz", "behaviorConfidence": 0.87,
+        "shortlist": [{"speciesId": 1001, "weight": 0.8, "species": {
+            **bat, "id": "1001",
+        }}],
+    }, {
+        "id": "event-2", "species": {**bat, "id": "bat-2"},
+        "timestamp": "2026-09-17T02:00:01Z", "shortlist": None,
+    }]}}}
+    rows = (await _client(data).get_raw_detections("1"))["detections"]
+    assert [r["species_id"] for r in rows] == ["bat-1", "bat-2"]
+    assert rows[0]["spCode"] == ""
+    assert rows[0]["image"] is None
+    assert rows[0]["alpha"] is None
+    assert rows[0]["classification"] == "bat"
+    assert rows[0]["detection_id"] == "event-1"
+    assert rows[0]["behavior"] == "Feeding buzz"
+    assert rows[0]["behavior_code"] == "feeding_buzz"
+    assert rows[0]["behavior_confidence"] == 0.87
+    assert rows[0]["shortlist"] == [{
+        "species_id": "1001", "species": "Big Brown Bat",
+        "scientific_name": "Eptesicus fuscus", "classification": "bat", "weight": 0.8,
+    }]
+    assert rows[1]["shortlist"] == []
+    assert rows[1]["behavior"] is None
+
+
 # ---- get_baseline_count / get_species_counts ------------------------------- #
 
 
@@ -93,7 +218,35 @@ async def test_get_baseline_count_keys_by_common_name() -> None:
         {"species": {"commonName": "Owl"}, "count": 3},
     ]}}
     out = await _client(data).get_baseline_count("1", months=2)
-    assert out == [{"bird": "Robin", "count": 50}, {"bird": "Owl", "count": 3}]
+    assert [(r["bird"], r["count"]) for r in out] == [("Robin", 50), ("Owl", 3)]
+    assert all(r["species_id"] is None for r in out)
+
+
+async def test_baseline_retains_bat_metadata_without_ebird_code() -> None:
+    data = {"station": {"topSpecies": [{"count": 5, "species": {
+        "id": "1001", "classification": "bat", "commonName": "Big Brown Bat",
+        "scientificName": "Eptesicus fuscus", "ebirdCode": None,
+    }}]}}
+    record = (await _client(data).get_baseline_count("1"))[0]
+    assert record["species_id"] == "1001"
+    assert record["classification"] == "bat"
+    assert record["scientific_name"] == "Eptesicus fuscus"
+    assert record["sp_code"] == ""
+
+
+async def test_overview_counts_distinct_ids_with_shared_names() -> None:
+    bat = {"id": "1001", "classification": "bat", "commonName": "Bat"}
+    data = {"station": {
+        "todayTop": [{"species": bat, "count": 2}],
+        "recent": [{"species": bat}, {"species": {**bat, "id": "1002"}}],
+        "hist": [{"species": bat}],
+    }}
+    out = await _client(data).get_overview(
+        "1", today=date(2026, 9, 17), new_species_cutoff=date(2026, 9, 1), baseline_days=30
+    )
+    assert out["new_species_window"] == 1
+    assert out["today_top"][0]["species_id"] == "1001"
+    assert out["today_top"][0]["classification"] == "bat"
 
 
 async def test_get_species_counts_keys_by_scientific_name() -> None:
@@ -180,6 +333,23 @@ async def test_get_time_of_day_folds_halfhour_bins_to_hours() -> None:
     assert robin[8] == 1
     assert out["station"][7] == 5  # station curve is the per-hour sum
     assert sum(out["station"]) == 6
+
+
+async def test_time_of_day_keeps_distinct_ids_with_shared_names() -> None:
+    data = {"timeOfDayDetectionCounts": [
+        {"species": {"id": "1", "commonName": "Bat", "classification": "bat"},
+         "bins": [{"key": 20, "count": 3}]},
+        {"species": {"id": "2", "commonName": "Bat", "classification": "bat"},
+         "bins": [{"key": 21, "count": 4}]},
+    ]}
+    out = await _client(data).get_time_of_day("1")
+    assert out["by_species_id"]["1"][20] == 3
+    assert out["by_species_id"]["2"][21] == 4
+    assert out["species"] == [
+        {"species": "Bat", "species_id": "1", "classification": "bat"},
+        {"species": "Bat", "species_id": "2", "classification": "bat"},
+    ]
+    assert sum(out["station"]) == 7
 
 
 # ---- get_daily_history ----------------------------------------------------- #

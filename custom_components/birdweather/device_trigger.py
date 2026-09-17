@@ -1,7 +1,7 @@
-"""Device triggers for BirdWeather — expose the detection events in the
+"""Device triggers for BirdWeather: expose the detection events in the
 automation editor's "When → device" picker.
 
-Both triggers wrap the `birdweather_event` bus event, filtered by its `type`
+Triggers wrap the `birdweather_event` bus event, filtered by its `type`
 field, via the core event trigger platform (the deconz / bthome pattern).
 """
 

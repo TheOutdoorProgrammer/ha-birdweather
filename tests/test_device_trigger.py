@@ -12,9 +12,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.birdweather import device_trigger
 from custom_components.birdweather.const import (
+    BAT_BEHAVIORS,
     CONF_STATION_ID,
     DOMAIN,
     EVENT_BIRDWEATHER,
+    TRIGGER_BAT_DETECTED,
     TRIGGER_NEW_SPECIES,
     TRIGGER_TYPES,
     TRIGGER_UNUSUAL_VISITOR,
@@ -69,22 +71,24 @@ async def test_lists_all_trigger_types(hass: HomeAssistant, device_id: str) -> N
         assert t[CONF_DEVICE_ID] == device_id
 
 
+@pytest.mark.parametrize("trigger_type", TRIGGER_TYPES)
 async def test_fires_on_matching_event(
-    hass: HomeAssistant, device_id: str, action_events: list
+    hass: HomeAssistant, device_id: str, action_events: list, trigger_type: str
 ) -> None:
-    await _install_automation(hass, device_id, TRIGGER_NEW_SPECIES)
+    await _install_automation(hass, device_id, trigger_type)
     hass.bus.async_fire(
         EVENT_BIRDWEATHER,
-        {"device_id": device_id, "type": TRIGGER_NEW_SPECIES, "species": "Barred Owl"},
+        {"device_id": device_id, "type": trigger_type, "species": "Big Brown Bat"},
     )
     await hass.async_block_till_done()
     assert len(action_events) == 1
 
 
+@pytest.mark.parametrize("trigger_type", [TRIGGER_NEW_SPECIES, TRIGGER_BAT_DETECTED, *BAT_BEHAVIORS])
 async def test_ignores_other_trigger_type(
-    hass: HomeAssistant, device_id: str, action_events: list
+    hass: HomeAssistant, device_id: str, action_events: list, trigger_type: str
 ) -> None:
-    await _install_automation(hass, device_id, TRIGGER_NEW_SPECIES)
+    await _install_automation(hass, device_id, trigger_type)
     hass.bus.async_fire(
         EVENT_BIRDWEATHER, {"device_id": device_id, "type": TRIGGER_UNUSUAL_VISITOR}
     )
@@ -92,12 +96,13 @@ async def test_ignores_other_trigger_type(
     assert action_events == []
 
 
+@pytest.mark.parametrize("trigger_type", TRIGGER_TYPES)
 async def test_ignores_other_device(
-    hass: HomeAssistant, device_id: str, action_events: list
+    hass: HomeAssistant, device_id: str, action_events: list, trigger_type: str
 ) -> None:
-    await _install_automation(hass, device_id, TRIGGER_NEW_SPECIES)
+    await _install_automation(hass, device_id, trigger_type)
     hass.bus.async_fire(
-        EVENT_BIRDWEATHER, {"device_id": "not-this-device", "type": TRIGGER_NEW_SPECIES}
+        EVENT_BIRDWEATHER, {"device_id": "not-this-device", "type": trigger_type}
     )
     await hass.async_block_till_done()
     assert action_events == []

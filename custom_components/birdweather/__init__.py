@@ -21,13 +21,16 @@ _CARDS = [
     ("/birdweather/birdweather-bird-card.js",      "www/birdweather-bird-card.js"),
     ("/birdweather/birdweather-bird-list-card.js", "www/birdweather-details-card.js"),
 ]
+_MODULES = [
+    ("/birdweather/birdweather-wildlife.js", "www/birdweather-wildlife.js"),
+]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register static paths and inject card JS once at integration load time."""
     www = Path(__file__).parent
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(url, str(www / path)) for url, path in _CARDS]
+        [StaticPathConfig(url, str(www / path)) for url, path in (*_CARDS, *_MODULES)]
     )
     integration = await async_get_integration(hass, DOMAIN)
     version = integration.version or "dev"
@@ -73,7 +76,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: BirdWeatherConfigEntry)
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: BirdWeatherConfigEntry) -> None:
-    """Clean up a removed station's persistent .storage files (10 per station).
+    """Clean up a removed station's persistent and legacy .storage files.
 
     All stores are namespaced by station id, so they're safe to delete regardless
     of any other configured stations. (BirdWeather streams audio, so there's no

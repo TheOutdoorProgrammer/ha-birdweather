@@ -43,10 +43,13 @@ async def main(station_id: str) -> None:
         coord._baseline_fetched_date = None
         coord._baseline_items = []
         coord._diel_by_species = {}
+        coord._diel_by_species_id = {}
         coord._diel_station = []
         coord._diel_fetched_date = None
         coord._stats_imported_date = None
         coord._event_buffer = []
+        coord._bat_state = {}
+        coord._species_metadata = {}
         coord._seen_species = {}
         coord._sp_codes = {}
         coord._sci_names = {}
@@ -60,7 +63,7 @@ async def main(station_id: str) -> None:
         # never loaded — the fakes above stand in.
         for attr in (
             "_store", "_last_seen_store", "_yearly_store", "_seven_day_store",
-            "_events_store", "_meta_store",
+            "_events_store", "_meta_store", "_bat_store",
         ):
             setattr(coord, attr, _FakeStore())
 
@@ -77,7 +80,7 @@ async def main(station_id: str) -> None:
             return f"{v.get('species')!r}"
         return repr(v)
 
-    for k in ("recent_detections", "last_detection", "detections_24h",
+    for k in ("recent_detections", "last_detection", "recent_bats", "last_bat_detection", "bat_events", "detections_24h",
               "daily_top_species", "notable_detection", "new_detection",
               "lifetime_species_count", "yearly_top_species", "rarest_species"):
         print(f"  {k:22} -> {head(k)}")
@@ -89,7 +92,8 @@ async def main(station_id: str) -> None:
 
     ld = data.get("last_detection") or {}
     print("\nlast_detection record:")
-    for f in ("species", "scientific_name", "sp_code", "alpha", "alpha6",
+    for f in ("species", "scientific_name", "species_id", "detection_id", "classification",
+              "behavior", "behavior_code", "behavior_confidence", "shortlist", "sp_code", "alpha", "alpha6",
               "ebird_url", "wikipedia_url", "allaboutbirds_url", "macaulay_url",
               "birdweather_url", "image_url", "audio_url",
               "confidence", "confidence_band", "last_seen", "rarity_score",

@@ -162,6 +162,29 @@ def test_normalise_detection_handles_missing_species() -> None:
     out = _normalise_detection({"timestamp": "t"})
     assert out["species"] is None
     assert out["audio_url"] is None
+    assert out["species_id"] is None
+    assert out["classification"] is None
+    assert out["shortlist"] == []
+
+
+def test_normalise_detection_retains_bat_metadata() -> None:
+    out = _normalise_detection({
+        "id": 123,
+        "species": {"id": 456, "classification": "bat", "commonName": "Bat"},
+        "behavior": "Search", "behaviorCode": "search", "behaviorConfidence": 0.0,
+        "shortlist": [None, {"weight": 0.0, "species": {
+            "id": 789, "classification": "bat", "commonName": "Alternative bat",
+        }}, {"speciesId": 101, "species": None}],
+    })
+    assert out["detection_id"] == "123"
+    assert out["species_id"] == "456"
+    assert out["classification"] == "bat"
+    assert out["sp_code"] is None
+    assert out["behavior_code"] == "search"
+    assert out["behavior_confidence"] == 0.0
+    assert out["shortlist"][0]["species_id"] == "789"
+    assert out["shortlist"][0]["weight"] == 0.0
+    assert out["shortlist"][1]["species_id"] == "101"
 
 
 # ---- _haversine_km --------------------------------------------------------- #

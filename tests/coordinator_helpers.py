@@ -22,6 +22,7 @@ _STORE_ATTRS = (
     "_seven_day_store",
     "_events_store",
     "_meta_store",
+    "_bat_store",
 )
 
 
@@ -75,10 +76,13 @@ def make_coordinator(
     c._baseline_fetched_date = None
     c._baseline_items = []
     c._diel_by_species = {}
+    c._diel_by_species_id = {}
     c._diel_station = []
     c._diel_fetched_date = None
     c._stats_imported_date = None
     c._event_buffer = []
+    c._bat_state = {}
+    c._species_metadata = {}
     c._seen_species = {}
     c._sp_codes = {}
     c._sci_names = {}

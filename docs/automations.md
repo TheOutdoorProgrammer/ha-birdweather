@@ -11,18 +11,32 @@ Create → When → Device**:
 
 | Trigger | Fires when |
 | --- | --- |
-| **New species detected** | A species is heard at this station for the **first time ever** — a genuine lifetime first. |
+| **New species detected** | An identification is first added to the station's lifetime history. |
 | **Unusual visitor detected** | A species the station already knows **returns after a long absence** (default 30 days unheard; see [Tuning](#tuning-the-unusual-visitor-threshold)). |
 | **Watched species detected** | A species **you chose to watch** is heard. Pick the species in **Settings → Devices & Services → BirdWeather → Configure** (a list of ones your station has detected, plus a free-text box for ones it hasn't yet). |
+| **Bat detected** (`bat_detected`) | A new bat event passes the alert-confidence threshold. |
+| **Searching in open space** (`bat_search_open`) | A new qualifying bat event carries this behavior code. |
+| **Searching in clutter** (`bat_search_clutter`) | A new qualifying bat event carries this behavior code. |
+| **Chasing** (`bat_chase`) | A new qualifying bat event carries this behavior code. |
+| **Feeding buzz** (`bat_feeding_buzz`) | A new qualifying bat event carries this behavior code. |
+| **Approaching** (`bat_approach`) | A new qualifying bat event carries this behavior code. |
+| **Passing** (`bat_pass`) | A new qualifying bat event carries this behavior code. |
 
 Pick the station, pick the trigger, and add whatever actions you like. The
 trigger makes the detection's details available to your actions through the
 event data described below.
 
+A bat detection can fire `bat_detected` and one behavior trigger. Choose one
+type if you want one notification per detection. Unknown or missing behavior
+codes still allow the generic bat trigger. These events report the classifier's
+result; they do not establish a confirmed species or behavior.
+
 ## Blueprints (push notification in two clicks)
 
-Four blueprints ship as starting points — three mobile notifications (one per
-device trigger) plus a media-player one:
+Four blueprints ship as starting points: mobile notifications for new species,
+unusual visitors and watched species, plus a media-player blueprint. The bat
+triggers also work directly in the automation editor or through the event
+example below.
 
 - **BirdWeather — New species notification** (`new_species`) — push with the
   bird's photo, the running lifetime species count, and tap-through **action
@@ -39,17 +53,20 @@ Each asks which **BirdWeather station** to watch and either a **mobile-app
 device** to notify or a **media player** to play on; titles/messages are
 editable.
 
-These deliberately show off **different event features** — photo, action buttons
-(`ebird_url`/`wikipedia_url`), `lifetime_species_count`, and audio
-(`audio_url`). None are tied to a particular trigger: **every `birdweather_event`
-carries the same fields** (see the table below), so you can mix and match — e.g.
-add eBird buttons to the unusual-visitor push, or play the call on a new species.
+The blueprints demonstrate photos, reference links, lifetime counts and audio.
+Check optional fields before using them in a custom notification: bats may
+have no photo, eBird code or bird-reference links, and lifetime counts apply
+only to `new_species` events.
 
 > **Audio caveats.** `audio_url` is BirdWeather's soundscape clip (FLAC). It's
 > only present when audio is enabled in the options *and* the station has a
 > recording for the detection (a station with audio sharing off produces silent
 > clips). FLAC may not play in iOS notification attachments or on every media
 > player.
+>
+> Bat clips remain the original recording. A tested BAT PUC clip was 250 kHz
+> FLAC; playback does not convert ultrasound to audible sound. A successful
+> playback action can therefore produce no audible bat call.
 
 ### Importing a blueprint
 
@@ -82,7 +99,7 @@ choose the imported blueprint, and fill in the station and the device to notify.
 
 ## Event reference
 
-All three triggers are filtered views of a single bus event,
+All ten triggers are filtered views of a single bus event,
 `birdweather_event`, discriminated by its `type` field. You can also trigger on
 the raw event (**When → Other → Manual event**, event type `birdweather_event`)
 to react to several stations at once or match on the payload yourself.
@@ -91,25 +108,25 @@ Event data:
 
 | Field | Description |
 | --- | --- |
-| `type` | `new_species`, `unusual_visitor`, or `watched_species`. |
+| `type` | `new_species`, `unusual_visitor`, `watched_species`, `bat_detected`, or one of the six behavior codes above. |
 | `device_id` | HA device-registry id of the station (what the device trigger filters on). |
 | `station_id` | The BirdWeather station ID. |
 | `device_name` | Friendly name of the station. |
-| `species` | Bird common name. |
+| `species` | BirdWeather's identification label, which can name a broader group. |
+| `species_id` | Stable BirdWeather identification ID, as a string when available. |
+| `detection_id` | Stable BirdWeather event ID, as a string when available. |
+| `classification` | Upstream classification, including `avian` or `bat`. |
 | `scientific_name` | Scientific name. |
-| `sp_code` | eBird species code. |
-| `alpha` | Four-letter alpha banding code (may be absent). |
+| `sp_code` | eBird species code; may be empty for bats. |
 | `image_url` | Photo URL for the species (may be absent). |
 | `audio_url` | BirdWeather soundscape clip (FLAC) for the detection, or `null` when audio is disabled or no recording exists. |
 | `confidence` | Detection confidence (0–1). |
 | `confidence_band` | `low` / `medium` / `high`. |
+| `behavior` | Reported behavior label, when available. |
+| `behavior_code` | Machine-readable behavior code, such as `bat_feeding_buzz`. |
+| `behavior_confidence` | Confidence in the behavior classification, separate from identification confidence. |
+| `shortlist` | Candidate records with `species_id`, `species`, `scientific_name`, `classification` and `weight`. These are alternatives for the same event, not confirmed species or extra sightings. |
 | `last_seen` | Timestamp of this detection. |
-| `count` | Times this species was heard in the recent (1-hour) window. |
-| `ebird_url` | eBird species page. |
-| `wikipedia_url` | Wikipedia article. |
-| `allaboutbirds_url` | All About Birds species guide. |
-| `macaulay_url` | Macaulay Library media page. |
-| `birdweather_url` | BirdWeather species page. |
 | `rarity_score` | Rarity vs. the station's rarity baseline (1.0 = rarest). |
 | `yearly_rank` | Rank within the rarity baseline (1 = most common). The field name mirrors the Haikubox pipeline and is kept for compatibility. |
 | `days_absent` | **`unusual_visitor` only** — days since the previous sighting. |
@@ -117,6 +134,40 @@ Event data:
 
 In templates these are reached via `trigger.event.data.<field>` (for example
 `{{ trigger.event.data.species }}`).
+
+Reference URLs, alpha codes and per-identification counts belong to sensor
+attributes; they are not included in the bus event.
+
+### Example: notify on a feeding buzz
+
+Replace `YOUR_STATION_ID` with the station's BirdWeather ID. This creates an HA
+persistent notification for each qualifying feeding-buzz event:
+
+```yaml
+alias: BirdWeather feeding buzz
+trigger:
+  - platform: event
+    event_type: birdweather_event
+    event_data:
+      station_id: "YOUR_STATION_ID"
+      type: bat_feeding_buzz
+action:
+  - service: persistent_notification.create
+    data:
+      title: Bat feeding buzz
+      message: >-
+        {{ trigger.event.data.species }}:
+        {{ trigger.event.data.behavior }}.
+        Identification confidence:
+        {{ (trigger.event.data.confidence | float(0) * 100) | round(0) }}%.
+        Behavior confidence:
+        {{ (trigger.event.data.behavior_confidence | float(0) * 100) | round(0) }}%.
+mode: queued
+max: 20
+```
+
+The API does not expose a taxonomic rank. Use `species_id` and the supplied
+label in automations without assuming every bat label resolves to a species.
 
 ## Tuning the unusual-visitor threshold
 
@@ -131,11 +182,12 @@ rarity baseline, which makes it a more reliable alerting signal than raw rarity.
 
 ## Confidence-gating alerts
 
-A separate **"Only alert above confidence"** option suppresses all three
-triggers for detections below a chosen confidence, independent of the feed
-filter that hides low-confidence detections from the sensors. So you can keep
-seeing "maybe" detections on the cards while only being pinged on confident
-hits. See [sensors.md](sensors.md#confidence).
+The **Only alert above confidence** option (`alert_min_confidence`) applies to
+all ten triggers. It compares the detection's identification confidence, not
+`behavior_confidence` or a shortlist weight. It is independent of the feed
+filter that hides detections from sensors and cards. To require a minimum
+behavior confidence too, add a template condition to your automation.
+See [sensors.md](sensors.md#confidence).
 
 ## How the events stay quiet
 
@@ -147,6 +199,18 @@ The events are designed not to flood you:
 - **Restarts are silent for `unusual_visitor`/`watched_species`.** The first
   poll of each session only establishes a baseline; it won't replay every
   long-absent or watched bird already in the current window.
-- **No re-firing while a bird lingers.** A species that stays present across
+- **No re-firing while a species lingers.** For the three original species
+  triggers, an identification that stays present across
   several polls fires once, not on every poll, because the events trigger on the
   *edge* of a species entering the recent window.
+
+Bat triggers work per detection. First setup fills the bat cache and establishes
+an alert watermark without replaying existing events. The watermark and IDs at
+that timestamp persist in `bat_events`, so repeated polls and restarts do not
+re-fire processed detections. Newer bat events can alert after a restart if they
+are still in the fetched sample. Lowering the threshold does not replay events
+already processed below it.
+
+Each poll reads at most 300 detections across three pages of 100. At a busy
+station, events can fall outside that sample before the next poll. The persisted
+watermark prevents replay; it does not guarantee delivery of every bat event.

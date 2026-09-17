@@ -103,8 +103,7 @@ async def test_entry_setup_creates_entities_with_states(hass: HomeAssistant) -> 
 
     registry = er.async_get(hass)
     entities = er.async_entries_for_config_entry(registry, entry.entry_id)
-    # 15 sensors + 1 binary sensor; no hardware suites in this poll.
-    assert sum(e.domain == "sensor" for e in entities) == 15
+    assert sum(e.domain == "sensor" for e in entities) == 17
     assert sum(e.domain == "binary_sensor" for e in entities) == 1
 
     def _state(suffix: str) -> str:
@@ -174,7 +173,7 @@ async def test_entry_setup_creates_puc_hardware_entities(hass: HomeAssistant) ->
     assert f"{STATION_ID}_temperature" in uids
     assert f"{STATION_ID}_light_level" in uids
     assert f"{STATION_ID}_battery_voltage" in uids
-    assert sum(e.domain == "sensor" for e in entities) == 15 + 11
+    assert sum(e.domain == "sensor" for e in entities) == 17 + 11
 
     temp = next(e for e in entities if e.unique_id == f"{STATION_ID}_temperature")
     assert hass.states.get(temp.entity_id).state == "21.5"

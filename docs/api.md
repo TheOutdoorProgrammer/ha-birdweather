@@ -1,6 +1,6 @@
 # BirdWeather API interactions
 
-This page documents every network call the integration makes — which GraphQL
+This page documents every network call the integration makes: which GraphQL
 queries it sends, when, with what variables, and what it does with the responses.
 It's a reference for debugging API behaviour, planning rate budgets, or reasoning
 about offline resilience.
@@ -16,12 +16,12 @@ A single GraphQL endpoint serves everything:
 POST https://app.birdweather.com/graphql
 ```
 
-All requests are **anonymous** — no API token or account. They go through Home
+All requests are anonymous, with no API token or account. They go through Home
 Assistant's shared `aiohttp` session (`async_get_clientsession(hass)`) with a
 `User-Agent: ha-birdweather` header. The station ID is passed as a query
-variable, never a credential. Bird photos are remote BirdWeather CDN URLs the
+variable, never a credential. Wildlife photos are remote BirdWeather CDN URLs the
 cards load directly (no image download/cache), and audio "play the call" streams
-the soundscape clip in the browser — neither is fetched by the integration.
+the soundscape clip in the browser. Neither is fetched by the integration.
 
 **Source:** [`client.py`](../custom_components/birdweather/client.py) owns every
 query (`BirdWeatherClient` + the discovery helpers); [`coordinator.py`](../custom_components/birdweather/coordinator.py)
@@ -34,8 +34,8 @@ uses the daily-history query for the recorder backfill.
 | Client method | GraphQL | When | Returns |
 |---|---|---|---|
 | `search_stations` / `get_station` / `nearby_stations` | `stations` / `station` | Config flow (discovery + validation) | public station nodes |
-| `get_raw_detections` | `station.detections(first:)` | every poll | recent detection events (newest first) |
-| `get_baseline_count` | `station.topSpecies(period:)` | once per day | `[{bird, count}]` rarity baseline |
+| `get_raw_detections` | `station.detections(first:, after:)` | every poll | recent bird and bat events, newest first |
+| `get_baseline_count` | `station.topSpecies(period:)` | once per day | rarity baseline with counts, species IDs and classification |
 | `get_overview` | `station { today, baseline, todayTop, life, recent, hist, earliestDetectionAt }` | every poll | native per-period aggregates |
 | `get_time_of_day` | `timeOfDayDetectionCounts(period:)` | once per day | 24-bucket diel histogram |
 | `get_sensors` | `station.sensors` | every poll | PUC hardware readings (or nulls) |
@@ -52,7 +52,7 @@ sequenceDiagram
     participant Store as HA .storage JSON
     participant Sensors as Sensor entities
 
-    Note over Coord,Store: _async_setup (once, before the first poll):<br/>load the 6 .storage files
+    Note over Coord,Store: _async_setup (once, before the first poll):<br/>load the 7 .storage files
     HA->>Coord: _async_update_data() - every 10 min
 
     opt once per calendar day
@@ -60,7 +60,9 @@ sequenceDiagram
         Coord->>API: timeOfDayDetectionCounts (diel histogram)
     end
 
-    Coord->>API: station.detections(first: 300)
+    loop Up to 3 detection pages
+        Coord->>API: station.detections(first: up to 100, after: cursor)
+    end
     API-->>Coord: recent events (newest first)
     Note right of Coord: filter by dt > now - 24h, then > now - 1h<br/>for the daily / recent windows
 
@@ -76,7 +78,7 @@ sequenceDiagram
     Sensors->>HA: state and attributes updated
 ```
 
-Calls are made **sequentially** — each `await` waits for the previous one. The
+Calls are made sequentially; each `await` waits for the previous one. The
 rarity baseline, diel histogram, and statistics backfill are gated to **once per
 calendar day** (cached in memory between polls); the detection feed, overview,
 and sensors run every poll.
@@ -93,35 +95,60 @@ surfaces as `cannot_connect`. See [troubleshooting.md](troubleshooting.md).
 
 ## The detection feed
 
-`get_raw_detections(station_id, first=DETECTION_FETCH_LIMIT)` pulls the most
-recent `DETECTION_FETCH_LIMIT` (300) detection events, newest first, and maps
-them into the raw shape the pipeline expects (`cn`, `sn`, `spCode`, `dt`,
-`image`, `audio`, `confidence`, plus the reference-link URLs and alpha codes).
-Everything time-windowed is then derived **client-side** from this one response:
-the trailing-24 h list and the 1-hour recent subset are filtered out of it by
-timestamp, so a single fetch feeds `recent_detections`, `last_detection`,
-new-species tracking, and the 7-day rarity rollup. A busy station can exhaust the
-300-event limit inside 24 h — a future refinement could switch to a
-time-bounded query.
+`get_raw_detections(station_id, first=DETECTION_FETCH_LIMIT)` fetches up to 300
+recent events, newest first, in at most three cursor pages of 100. The client
+deduplicates detection IDs and stops if a page is empty, a cursor is missing or
+repeated, or a page adds no new events. Short or overlapping pages can yield
+fewer than 300 records. `get_detections` uses the same pagination logic.
+
+The feed contains both birds and bats. Raw records retain `cn`, `sn`, `spCode`,
+`dt`, `image`, `audio`, `confidence`, reference URLs and alpha codes, and add:
+
+| Field | Meaning |
+|---|---|
+| `detection_id` | BirdWeather detection ID, normalized to a string |
+| `species_id` | BirdWeather identification ID, normalized to a string |
+| `classification` | Upstream classification, including `avian` and `bat` |
+| `behavior`, `behavior_code`, `behavior_confidence` | Reported behavior, its machine code and separate confidence, when available |
+| `shortlist` | Alternative identifications, each with `species_id`, `species`, `scientific_name`, `classification` and `weight` |
+
+Bats can have no eBird code, alpha code or photo. An empty `spCode` does not
+discard them. Shortlist weights describe the classifier's alternatives; they
+are not additional sightings or confirmed species. The API supplies no
+taxonomic rank, so the integration does not infer species-level resolution
+from a label that may name a broader group.
+
+The coordinator filters this sample by timestamp for the configured recent
+window and the trailing 24 hours. It feeds the recent lists, event caches,
+automation events and seven-day rarity rollup. A busy station can produce more
+than 300 events between polls, so feed-based lists and alerts can miss events.
+Pagination does not make this a complete history download. The bat-only cache
+keeps previously observed bats through later bird activity, but cannot recover
+events the API sample never included.
 
 ## Native aggregates (overview)
 
 `get_overview` is one round-trip returning BirdWeather's **true** per-period
-figures — not derived from the (sampled) feed: today's total + species count, a
+figures: today's total + species count, a
 trailing-baseline total (for `activity_level`'s "typical day"), lifetime species
 count, a new-species-window diff, the day's top species (with photos), and
 `earliestDetectionAt`. These back `daily_count`, `daily_top_species`,
 `species_diversity`, `activity_level`, `new_species_window`, `lifetime_species`,
-and `history_start`.
+and `history_start`. These remain station-wide, including all classifications
+returned by BirdWeather. The bat sensors do not change their scope. Aggregate
+records carry species IDs and classification; new-species comparisons prefer
+stable IDs over names.
 
 ## Rarity baseline & diel histogram (daily)
 
 `get_baseline_count` returns `topSpecies` over the trailing rarity window
-(default 1 month; tunable — see [advanced.md](advanced.md)) as `[{bird, count}]`,
+(default 1 month; see [advanced.md](advanced.md)) as `bird`/`count` records with
+species IDs, classification and display metadata,
 ranked into the `{species → rank}` map that rarity scoring divides by.
 `get_time_of_day` folds the trailing-7-day half-hourly bins into a 24-bucket
 hourly curve for `peak_activity_hour`. Both refresh once per calendar day and are
-cached between polls.
+cached between polls. Diel results include both name-keyed `by_species` and
+ID-keyed `by_species_id` curves, plus species metadata.
 
 ## Statistics backfill (daily)
 
@@ -139,12 +166,20 @@ species `mean`). Idempotent, runs once per calendar day. See
 | `DEFAULT_SCAN_INTERVAL` | 600 s (10 min); user-tunable 5–60 min | [`const.py`](../custom_components/birdweather/const.py) |
 | `RECENT_WINDOW_HOURS` | 1 h; client-side filter, user-tunable 1–24 h | [`const.py`](../custom_components/birdweather/const.py) |
 | `DAILY_WINDOW_HOURS` | 24 h | [`const.py`](../custom_components/birdweather/const.py) |
-| `DETECTION_FETCH_LIMIT` | 300 events/poll | [`const.py`](../custom_components/birdweather/const.py) |
+| `DETECTION_FETCH_LIMIT` | Up to 300 events/poll, at most 3 pages of 100 | [`const.py`](../custom_components/birdweather/const.py) |
 
-At the default cadence that's a handful of GraphQL calls every 10 minutes
-(detections + overview + sensors each poll; baseline + diel + history once a day)
-— comfortably within any sensible budget. The poll interval and the windows are
+At the default cadence, a poll makes up to five GraphQL requests: three for
+detections, one for overview and one for hardware sensors. Baseline, diel and
+history queries add up to three requests once a day. The interval and windows are
 tunable in the options flow's Advanced section (see [advanced.md](advanced.md)).
+
+## Bat audio
+
+The integration exposes BirdWeather's original soundscape URL. A BAT PUC clip
+checked during development was 250 kHz FLAC. Playback does not add time expansion
+or frequency shifting, so ultrasonic calls may be inaudible or unsupported by
+the browser or media player. Use BirdWeather's bat playback tools to inspect
+those calls.
 
 ## Failure handling
 
