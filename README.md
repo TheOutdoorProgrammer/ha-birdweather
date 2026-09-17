@@ -30,6 +30,49 @@ have gaps. Station totals and diversity still cover every classification.
 Recordings play at their original speed; ultrasonic bat calls may be inaudible.
 Time-expanded bat audio is not implemented.
 
+## Briefs and interval reports
+
+The response action `birdweather.get_activity` counts published detections in an
+exact interval, independently of the capped recent-detection sensors:
+
+```yaml
+- action: birdweather.get_activity
+  data:
+    config_entry_id: YOUR_BIRDWEATHER_CONFIG_ENTRY_ID
+    start: "{{ today_at('00:00').isoformat() }}"
+    end: "{{ now().isoformat() }}"
+  response_variable: wildlife
+- if: "{{ wildlife.complete }}"
+  then:
+    - action: persistent_notification.create
+      data:
+        message: >-
+          {{ wildlife.bird_count }} bird detections and
+          {{ wildlife.bat_count }} bat detections so far today.
+```
+
+Bounds require timezone offsets. Start is inclusive, end is exclusive, and the
+maximum interval is eight elapsed days. The response includes `bird_count`,
+`bat_count`, `other_count`, `total_count`, and `species` sorted by detection count.
+Each species row includes `species_id`, `species`, `scientific_name`,
+`classification`, and `count`. BirdWeather's `avian` classification counts as a
+bird; missing or other classifications remain in `other_count`.
+
+The action fetches covering UTC calendar dates and pages through every result,
+deduplicating stable detection IDs before applying exact timestamps. It stops
+after 100 pages or 60 seconds. Check `complete` before using any count: a page
+limit, stalled cursor, or malformed record returns `complete: false`, a `reason`,
+null counts, and an empty species list. Transport errors and timeouts fail the
+action. Empty accessible history is a successful zero, while inaccessible
+stations are errors.
+
+Counts describe detections available through BirdWeather's public API at query
+time, not individual animals or proof that the recorder ran continuously.
+Upstream station filters still apply. Late uploads or later reclassifications
+can change a past report. A caller that stores a catch-up cutoff should advance
+it only after successful report delivery, and disclose unavailable wildlife
+data instead of treating failed or incomplete queries as zero.
+
 ## Features
 
 - **Recent detections** — species heard in the last hour, updated every few minutes

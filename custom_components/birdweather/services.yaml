@@ -1,0 +1,24 @@
+get_activity:
+  name: Get wildlife activity
+  description: Count published detections in an exact interval of up to eight days. Check complete before using counts.
+  fields:
+    config_entry_id:
+      name: Station
+      required: true
+      selector:
+        config_entry:
+          integration: birdweather
+    start:
+      name: Start
+      description: Inclusive ISO timestamp with timezone offset.
+      required: true
+      example: "2026-09-16T00:00:00-04:00"
+      selector:
+        text:
+    end:
+      name: End
+      description: Exclusive ISO timestamp with timezone offset.
+      required: true
+      example: "2026-09-17T00:00:00-04:00"
+      selector:
+        text:

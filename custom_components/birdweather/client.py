@@ -22,7 +22,7 @@ from __future__ import annotations
 import html
 import math
 import re
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -34,6 +34,7 @@ API_URL = "https://app.birdweather.com/graphql"
 # requires both ends, so there's no open-ended "since the beginning").
 _ALLTIME_FROM = "2015-01-01"
 _DETECTION_PAGE_SIZE = 100
+_ACTIVITY_MAX_PAGES = 100
 
 # --- GraphQL documents -------------------------------------------------------
 
@@ -115,6 +116,17 @@ query stationTopSpecies($id: ID!, $period: InputDuration, $limit: Int) {
         imageLicense
         imageLicenseUrl
       }
+    }
+  }
+}
+"""
+
+_ACTIVITY_QUERY = """
+query stationActivity($id: ID!, $period: InputDuration!, $first: Int!, $after: String) {
+  station(id: $id) {
+    detections(period: $period, first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id timestamp species { id commonName scientificName classification } }
     }
   }
 }
@@ -406,6 +418,114 @@ class BirdWeatherClient:
                 }
             )
         return {"detections": out}
+
+    async def get_activity(
+        self, station_id: str, start: datetime, end: datetime
+    ) -> dict[str, Any]:
+        """Count published detections in an exact, bounded [start, end) interval."""
+        if start.utcoffset() is None or end.utcoffset() is None:
+            raise ValueError("Activity bounds must include a timezone")
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
+        if not timedelta(0) < end - start <= timedelta(days=8):
+            raise ValueError("Activity interval must be positive and at most eight days")
+        result: dict[str, Any] = {
+            "start": start.isoformat(), "end": end.isoformat(),
+            "complete": False, "reason": "page_limit", "pages": 0,
+            "bird_count": None, "bat_count": None, "other_count": None,
+            "total_count": None, "species": [],
+        }
+        # InputDuration has inclusive DATE bounds, not datetime bounds.
+        period = {
+            "from": start.date().isoformat(),
+            "to": (end - timedelta(microseconds=1)).date().isoformat(),
+            "timezone": "UTC",
+        }
+        seen: dict[str, tuple[str, str | None, str | None]] = {}
+        cursors: set[str] = set()
+        species: dict[str, dict[str, Any]] = {}
+        counts = {"bird": 0, "bat": 0, "other": 0}
+        after = None
+        for page in range(_ACTIVITY_MAX_PAGES):
+            data = await self._query(_ACTIVITY_QUERY, {
+                "id": station_id, "period": period,
+                "first": _DETECTION_PAGE_SIZE, "after": after,
+            })
+            station = data.get("station")
+            if station is None:
+                raise BirdWeatherError("Station not found or not publicly accessible")
+            connection = station.get("detections")
+            result["pages"] = page + 1
+            if not isinstance(connection, dict):
+                result["reason"] = "invalid_response"
+                return result
+            nodes, info = connection.get("nodes"), connection.get("pageInfo")
+            if (
+                not isinstance(nodes, list) or not isinstance(info, dict)
+                or not isinstance(info.get("hasNextPage"), bool)
+            ):
+                result["reason"] = "invalid_response"
+                return result
+            added = 0
+            for node in nodes:
+                if not isinstance(node, dict):
+                    result["reason"] = "invalid_detection"
+                    return result
+                identity = _id(node.get("id"))
+                try:
+                    timestamp = datetime.fromisoformat(node["timestamp"])
+                    if timestamp.utcoffset() is None:
+                        raise ValueError
+                except (KeyError, TypeError, ValueError):
+                    result["reason"] = "invalid_detection"
+                    return result
+                sp = node.get("species") or {}
+                if not identity or not isinstance(sp, dict):
+                    result["reason"] = "invalid_detection"
+                    return result
+                metadata = _species_identity(sp)
+                fingerprint = (
+                    timestamp.astimezone(UTC).isoformat(),
+                    metadata["species_id"], metadata["classification"],
+                )
+                if identity in seen:
+                    if seen[identity] != fingerprint:
+                        result["reason"] = "changed_detection"
+                        return result
+                    continue
+                seen[identity] = fingerprint
+                added += 1
+                if not start <= timestamp < end:
+                    continue
+                classification = metadata["classification"]
+                category = "bird" if classification == "avian" else classification
+                counts[category if category in ("bird", "bat") else "other"] += 1
+                key = metadata["species_id"]
+                if key is None:
+                    if category in ("bird", "bat"):
+                        result["reason"] = "invalid_species"
+                        return result
+                    continue
+                if key not in species:
+                    species[key] = {
+                        **metadata, "species": sp.get("commonName") or "Unknown",
+                        "scientific_name": sp.get("scientificName"), "count": 0,
+                    }
+                species[key]["count"] += 1
+            if not info["hasNextPage"]:
+                result.update({
+                    "complete": True, "reason": None,
+                    "bird_count": counts["bird"], "bat_count": counts["bat"],
+                    "other_count": counts["other"], "total_count": sum(counts.values()),
+                    "species": sorted(species.values(), key=lambda s: (-s["count"], s["species_id"])),
+                })
+                return result
+            cursor = info.get("endCursor")
+            if not added or not isinstance(cursor, str) or not cursor or cursor in cursors:
+                result["reason"] = "pagination_stalled"
+                return result
+            cursors.add(cursor)
+            after = cursor
+        return result
 
     async def get_baseline_count(
         self, station_id: str, months: int = 1, limit: int = 200

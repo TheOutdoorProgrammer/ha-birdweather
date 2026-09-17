@@ -254,6 +254,10 @@ class BirdWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "species": self._species_metadata,
         })
 
+    async def async_get_activity(self, start: datetime, end: datetime) -> dict[str, Any]:
+        """Query complete interval history independently of the capped poll feed."""
+        return await self._client.get_activity(self.station_id, start, end)
+
     @staticmethod
     async def async_remove_stores(hass: HomeAssistant, station_id: str) -> None:
         """Delete this station's persistent .storage files (live + legacy).

@@ -12,6 +12,7 @@ from homeassistant.loader import async_get_integration
 
 from .const import CONF_STATION_ID, DOMAIN
 from .coordinator import BirdWeatherConfigEntry, BirdWeatherCoordinator
+from .services import async_register_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -28,6 +29,7 @@ _MODULES = [
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register static paths and inject card JS once at integration load time."""
+    async_register_services(hass)
     www = Path(__file__).parent
     await hass.http.async_register_static_paths(
         [StaticPathConfig(url, str(www / path)) for url, path in (*_CARDS, *_MODULES)]
